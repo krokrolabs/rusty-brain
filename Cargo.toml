@@ -26,3 +26,4 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+rmcp = { version = "3.9", features = ["client", "transport-child-process"] }
