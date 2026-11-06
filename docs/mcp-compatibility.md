@@ -100,3 +100,18 @@ successful-call, and handled-error modes, then accepts the real server's raw
 stdout as protocol-only. `scripts/verify-dsh.sh` separately performs structural
 composition and the real local dsh/Ollama journey; a dump-only run is never a
 live pass.
+
+## Provenance and recall scoping (schema 2)
+
+- Every memory carries `agent` (which harness/CLI wrote it) and `session` (when
+  the harness provided one). Brains created before provenance are migrated
+  additively on open; their rows read as empty strings.
+- `recall` accepts an optional `agent` argument: `all` (default), `self`,
+  `others`, or an exact agent name. Both the semantic and the keyword legs are
+  filtered, so `others` never leaks the caller's own rows.
+- `stats` adds `by_agent`: per-agent active-memory counts, sorted by agent.
+- A brain records one embedding model in its metadata and opens with it;
+  unknown model ids are refused. `reembed` is a CLI-only migration command that
+  regenerates every vector with the target model and keeps the old brain as a
+  backup. Exported snapshots include `agent` and `session` and use the brain's
+  actual embedding width (384 or 768).

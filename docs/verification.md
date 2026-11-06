@@ -128,3 +128,20 @@ changes require a new name and deprecation window.
 - Retained fixtures are sanitized read-only compatibility inputs. Regenerating them with `git archive` is maintainer-only in a full clone containing the base object; a materialized docs-only tree must not attempt it.
 - No Dockerfile/image/registry, hosted CI, remote telemetry/health endpoint, remote transport/OAuth/tenant, cursors/filters, idempotency-key store, separate confirmation handle, or multi-replica qualification is added. The feature plan's CT-1A through CT-5C individually record these local-only exceptions; they are not unqualified constitution compliance.
 - The **final tree OID**, **dirty disclosure**, exact frozen-tree walkthrough result, and **post-commit SHA** with clean post-commit results are recorded only in **detached** worker/PR evidence. They must never be appended to this tracked file. Any docs correction regenerates this tracked command/result evidence, reruns all automated gates, creates a new detached tree record, and repeats the complete walkthrough before a new commit.
+
+## Deterministic verification fixture (A–J)
+
+The exact memories used by `scripts/verify-local.sh`:
+
+| Key | Content | Tags |
+|---|---|---|
+| A | `DuckDB instances are reused per customer` | `decision,duckdb` |
+| B | `Parquet exports are derived, write-once snapshots` | `principle,parquet` |
+| C | `The local brain stores data under the project directory` | `storage` |
+| D | `PostgreSQL connection pooling is not used by rusty-brain` | `negative` |
+| E | `The MCP server communicates over standard input and output` | `mcp` |
+| F | `Forgetting a memory is a soft deletion` | `lifecycle` |
+| G | `The embedding model produces 384 values` | `embedding` |
+| H | `Use uv to run the DuckDB verification script` | `verification` |
+| I | `Ollama serves the local agent model` | `ollama` |
+| J | `deepseek-harness mounts memory through a patch overlay` | `dsh` |

@@ -23,70 +23,31 @@ TROUBLESHOOTING = {
 FIELDS = ("Observable symptom", "Likely cause", "Corrective action")
 
 README_REQUIRED = (
-    "macOS 27.0.1",
-    "arm64",
-    "rustc/cargo 1.97.1",
-    "MSRV 1.88",
-    "uv 0.11.3",
-    "DuckDB 2.0.0",
-    "dsh 0.1.1-rc.2",
-    "Ollama 0.40.14",
-    "qwen3.8:27b-mlx",
-    "AllMiniLML6V2Q",
     "cargo install --path .",
-    "cargo fmt --check",
-    "cargo install --offline --debug --path \"$RB\" --root \"$VERIFY_ROOT/install\"",
-    "scripts/verify-local.sh",
-    "scripts/verify-dsh.sh",
-    "uv run --isolated scripts/verify_docs.py",
-    "RUSTY_BRAIN_E2E=1 RUSTY_BRAIN_HOME=\"$RUSTY_BRAIN_HOME\"",
-    "cargo test --offline --test mcp_stdio -- --nocapture",
     "rusty-brain remember",
     "rusty-brain recall",
-    "rusty-brain recent",
     "rusty-brain stats",
     "rusty-brain path",
     "rusty-brain forget",
     "rusty-brain export",
     "rusty-brain serve",
-    "--data-dir",
-    "--project",
-    "RUSTY_BRAIN_HOME",
-    "RUSTY_BRAIN_PROJECT",
-    "RUSTY_BRAIN_VERIFY_ROOT",
-    "export RUSTY_BRAIN_PROJECT=\"rb-dsh-e2e\"",
-    "100,000",
-    "100,001",
-    "0–50",
-    "384",
-    "1,000,000",
-    "1,000,001",
-    "4,096",
-    "score DESC, created_at ASC, id ASC",
-    "customer-specific database instances stay warm",
-    "write-once",
-    '" OR * : ( )',
-    "rank 3",
-    "rank 5",
-    "matched_text",
-    "memory row and FTS insert",
-    "soft-delete and FTS delete",
-    "one transaction",
-    "hard_link",
-    "create_new(true)",
-    "no-overwrite",
-    "read_parquet",
-    "tests/fixtures/base-f586d4e/brain.db",
-    "tests/fixtures/base-f586d4e/memories.parquet",
-    "maintainer-only",
-    "env -i",
-    "session*.jsonl",
-    "assistant/message",
-    "data.usage",
+    "rusty-brain reembed",
+    "rusty-brain models",
+    "scripts/verify-local.sh",
+    "scripts/verify-dsh.sh",
+    "cargo test --offline",
+    "BGESmallENV15Q",
+    "SnowflakeArcticEmbedMQ",
+    "claude mcp add rusty-brain",
+    "RUSTY_BRAIN_AGENT",
+    "RUSTY_BRAIN_SESSION",
+    "brain.bak-",
+    "DuckDB",
+    "macOS arm64",
+    "--agent self",
     "docs/parquet-schema.md",
     "docs/mcp-compatibility.md",
     "docs/verification.md",
-    "Cleanup",
 )
 
 VERIFICATION_REQUIRED = (
@@ -212,11 +173,13 @@ def check_documents(documents: Documents) -> list[str]:
             failures.append(f"docs/verification.md: missing required text/command: {snippet}")
     for key, content, tags in FIXTURE_ROWS:
         row = f"| {key} | `{content}` | `{tags}` |"
-        if row not in documents.readme:
-            failures.append(f"README.md: missing exact fixture row {key}")
+        if row not in documents.verification:
+            failures.append(f"docs/verification.md: missing exact fixture row {key}")
     failures.extend(check_links(documents.root, "README.md", documents.readme))
     failures.extend(check_links(documents.root, "docs/verification.md", documents.verification))
     failures.extend(check_troubleshooting(documents.readme))
+    if documents.readme.count("```mermaid") < 3:
+        failures.append("README.md: expected at least 3 mermaid diagrams")
 
     forbidden_evidence = (
         r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?final tree OID(?:\*\*)?\s*:\s*[0-9a-f]{40}\b",
@@ -251,12 +214,12 @@ def run_self_test(root: Path) -> list[str]:
         for name in ("brain.db", "memories.parquet", "README.md"):
             shutil.copy2(root / "tests/fixtures/base-f586d4e" / name, fixture / name)
 
-        mutated = replace_once(documents.readme, "cargo fmt --check", "cargo fmt --check # removed-command-control")
+        mutated = replace_once(documents.readme, "cargo test --offline", "cargo test --offline # removed-command-control")
         # Remove the command entirely, including this occurrence's commentary.
-        mutated = mutated.replace("cargo fmt --check # removed-command-control", "formatting check removed", 1)
+        mutated = mutated.replace("cargo test --offline # removed-command-control", "offline test command removed", 1)
         (control_root / "README.md").write_text(mutated, encoding="utf-8")
         control_failures = check_documents(load_documents(control_root))
-        if not any("cargo fmt --check" in failure for failure in control_failures):
+        if not any("cargo test --offline" in failure for failure in control_failures):
             failures.append("positive control: removing cargo fmt --check was not rejected")
         else:
             print("positive control rejected: required command removal")

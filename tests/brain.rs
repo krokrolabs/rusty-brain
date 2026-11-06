@@ -56,16 +56,33 @@ async fn copy_fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
 async fn remember_recall_forget_roundtrip() {
     let (_dir, store) = open_store().await;
     let a = store
-        .remember("duckdb warm instances", "decision", &unit(384, 0))
+        .remember(
+            "duckdb warm instances",
+            "decision",
+            "test-agent",
+            "test-session",
+            &unit(384, 0),
+        )
         .await
         .unwrap();
     let b = store
-        .remember("parquet exports are derived", "principle", &unit(384, 1))
+        .remember(
+            "parquet exports are derived",
+            "principle",
+            "test-agent",
+            "test-session",
+            &unit(384, 1),
+        )
         .await
         .unwrap();
 
     let hits = store
-        .recall("warm instances", 5, &unit(384, 0))
+        .recall(
+            "warm instances",
+            5,
+            &rusty_brain::store::AgentFilter::All,
+            &unit(384, 0),
+        )
         .await
         .unwrap();
     assert_eq!(hits[0].memory.id, a, "nearest vector must rank first");
@@ -74,7 +91,12 @@ async fn remember_recall_forget_roundtrip() {
 
     assert!(store.forget(&a).await.unwrap());
     let hits = store
-        .recall("warm instances", 5, &unit(384, 0))
+        .recall(
+            "warm instances",
+            5,
+            &rusty_brain::store::AgentFilter::All,
+            &unit(384, 0),
+        )
         .await
         .unwrap();
     assert!(
@@ -88,13 +110,22 @@ async fn remember_recall_forget_roundtrip() {
 #[tokio::test]
 async fn stats_counts_live_memories() {
     let (dir, store) = open_store().await;
-    store.remember("one", "", &unit(384, 0)).await.unwrap();
-    let id = store.remember("two", "", &unit(384, 1)).await.unwrap();
-    store.remember("three", "", &unit(384, 2)).await.unwrap();
+    store
+        .remember("one", "", "test-agent", "test-session", &unit(384, 0))
+        .await
+        .unwrap();
+    let id = store
+        .remember("two", "", "test-agent", "test-session", &unit(384, 1))
+        .await
+        .unwrap();
+    store
+        .remember("three", "", "test-agent", "test-session", &unit(384, 2))
+        .await
+        .unwrap();
     store.forget(&id).await.unwrap();
     let stats = store.stats(&dir.path().join("brain.db")).await.unwrap();
     assert_eq!(stats.memories, 2);
-    assert_eq!(stats.model, "AllMiniLML6V2Q");
+    assert_eq!(stats.model, "BGESmallENV15Q");
 }
 
 #[tokio::test]
@@ -102,7 +133,13 @@ async fn export_roundtrip_reads_back_floats() {
     let (_dir, store) = open_store().await;
     let original = unit(384, 7);
     store
-        .remember("vector payload", "", &original)
+        .remember(
+            "vector payload",
+            "",
+            "test-agent",
+            "test-session",
+            &original,
+        )
         .await
         .unwrap();
     let rows = store.all_for_export().await.unwrap();
@@ -118,10 +155,26 @@ async fn recall_ties_use_score_created_at_then_id_across_reopen() -> Result<()> 
     // Equal vectors give semantic ranks A/B/C. Decreasing content lengths give
     // FTS ranks C/B/A, so every reciprocal-rank-fusion score is exactly tied.
     let a = store
-        .remember("tie extra extra extra extra extra", "", &embedding)
+        .remember(
+            "tie extra extra extra extra extra",
+            "",
+            "test-agent",
+            "test-session",
+            &embedding,
+        )
         .await?;
-    let b = store.remember("tie extra extra", "", &embedding).await?;
-    let c = store.remember("tie", "", &embedding).await?;
+    let b = store
+        .remember(
+            "tie extra extra",
+            "",
+            "test-agent",
+            "test-session",
+            &embedding,
+        )
+        .await?;
+    let c = store
+        .remember("tie", "", "test-agent", "test-session", &embedding)
+        .await?;
     let (_db, conn) = raw_connection(&path).await;
     let a_fixed = "00000000-0000-4000-8000-000000000003";
     let b_fixed = "00000000-0000-4000-8000-000000000002";
@@ -132,7 +185,9 @@ async fn recall_ties_use_score_created_at_then_id_across_reopen() -> Result<()> 
 
     let expected_created_order = vec![a_fixed, c_fixed, b_fixed];
     for _ in 0..8 {
-        let hits = store.recall("tie", 3, &embedding).await?;
+        let hits = store
+            .recall("tie", 3, &rusty_brain::store::AgentFilter::All, &embedding)
+            .await?;
         assert_eq!(hits.len(), 3);
         assert_eq!(
             hits[0].score, hits[1].score,
@@ -152,7 +207,9 @@ async fn recall_ties_use_score_created_at_then_id_across_reopen() -> Result<()> 
     set_identity_and_time(&conn, c_fixed, c_fixed, "2026-01-01T00:00:00Z").await;
     let expected_id_order = vec![c_fixed, a_fixed, b_fixed];
     for _ in 0..8 {
-        let hits = store.recall("tie", 3, &embedding).await?;
+        let hits = store
+            .recall("tie", 3, &rusty_brain::store::AgentFilter::All, &embedding)
+            .await?;
         let actual: Vec<&str> = hits.iter().map(|hit| hit.memory.id.as_str()).collect();
         assert_eq!(actual, expected_id_order, "equal score/time uses id ASC");
     }
@@ -162,7 +219,9 @@ async fn recall_ties_use_score_created_at_then_id_across_reopen() -> Result<()> 
     let copied = dir.path().join("copied.db");
     std::fs::copy(&path, &copied)?;
     let reopened = Store::open(&copied).await?;
-    let hits = reopened.recall("tie", 3, &embedding).await?;
+    let hits = reopened
+        .recall("tie", 3, &rusty_brain::store::AgentFilter::All, &embedding)
+        .await?;
     let actual: Vec<&str> = hits.iter().map(|hit| hit.memory.id.as_str()).collect();
     assert_eq!(
         actual, expected_id_order,
@@ -176,30 +235,64 @@ async fn limits_and_utf8_content_boundaries_are_exact() -> Result<()> {
     let (dir, store) = open_store().await;
     let path = dir.path().join("brain.db");
     let embedding = unit(384, 0);
-    assert!(store.recall("anything", 0, &embedding).await?.is_empty());
+    assert!(
+        store
+            .recall(
+                "anything",
+                0,
+                &rusty_brain::store::AgentFilter::All,
+                &embedding
+            )
+            .await?
+            .is_empty()
+    );
     assert!(store.recent(0).await?.is_empty());
-    let recall_error = store.recall("anything", 51, &embedding).await.unwrap_err();
+    let recall_error = store
+        .recall(
+            "anything",
+            51,
+            &rusty_brain::store::AgentFilter::All,
+            &embedding,
+        )
+        .await
+        .unwrap_err();
     assert!(recall_error.to_string().contains("between 0 and 50"));
     let recent_error = store.recent(51).await.unwrap_err();
     assert!(recent_error.to_string().contains("between 0 and 50"));
 
     let accepted = "é".repeat(50_000);
     assert_eq!(accepted.len(), 100_000);
-    store.remember(&accepted, "", &embedding).await?;
+    store
+        .remember(&accepted, "", "test-agent", "test-session", &embedding)
+        .await?;
     let rejected = format!("{accepted}é");
     assert_eq!(rejected.len(), 100_002);
-    let error = store.remember(&rejected, "", &embedding).await.unwrap_err();
+    let error = store
+        .remember(&rejected, "", "test-agent", "test-session", &embedding)
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("100000"));
     assert_eq!(store.stats(&path).await?.memories, 1);
 
     let one_too_many_ascii = "x".repeat(100_001);
     assert!(
         store
-            .remember(&one_too_many_ascii, "", &embedding)
+            .remember(
+                &one_too_many_ascii,
+                "",
+                "test-agent",
+                "test-session",
+                &embedding
+            )
             .await
             .is_err()
     );
-    assert!(store.remember(" \n\t ", "", &embedding).await.is_err());
+    assert!(
+        store
+            .remember(" \n\t ", "", "test-agent", "test-session", &embedding)
+            .await
+            .is_err()
+    );
     assert_eq!(store.stats(&path).await?.memories, 1);
     Ok(())
 }
@@ -209,9 +302,22 @@ async fn operator_text_is_escaped_and_uuid_rules_are_canonical() -> Result<()> {
     let (_dir, store) = open_store().await;
     let embedding = unit(384, 0);
     let id = store
-        .remember("ordinary lexical content", "", &embedding)
+        .remember(
+            "ordinary lexical content",
+            "",
+            "test-agent",
+            "test-session",
+            &embedding,
+        )
         .await?;
-    let hits = store.recall("\" OR * : ( )", 5, &embedding).await?;
+    let hits = store
+        .recall(
+            "\" OR * : ( )",
+            5,
+            &rusty_brain::store::AgentFilter::All,
+            &embedding,
+        )
+        .await?;
     assert!(
         hits.iter().all(|hit| !hit.matched_text),
         "operators must not inject a lexical hit"
@@ -236,7 +342,13 @@ async fn mismatched_model_is_refused_before_any_store_write() -> Result<()> {
     let (dir, store) = open_store().await;
     let path = dir.path().join("brain.db");
     store
-        .remember("must remain unchanged", "", &unit(384, 0))
+        .remember(
+            "must remain unchanged",
+            "",
+            "test-agent",
+            "test-session",
+            &unit(384, 0),
+        )
         .await?;
     let (_db, conn) = raw_connection(&path).await;
     conn.execute("DROP TABLE memories_fts", ()).await?;
@@ -297,7 +409,13 @@ async fn remember_second_statement_fault_rolls_back_memory_insert() -> Result<()
     let (_db, conn) = raw_connection(&path).await;
     conn.execute("DROP TABLE memories_fts", ()).await?;
     let error = store
-        .remember("transaction must roll back", "fault", &unit(384, 0))
+        .remember(
+            "transaction must roll back",
+            "fault",
+            "test-agent",
+            "test-session",
+            &unit(384, 0),
+        )
         .await
         .unwrap_err();
     assert_eq!(scalar_i64(&conn, "SELECT count(*) FROM memories").await, 0);
@@ -311,7 +429,14 @@ async fn assert_forgotten_absence(
     id: &str,
     active_count: i64,
 ) -> Result<()> {
-    let hits = store.recall("absence control", 10, &unit(384, 0)).await?;
+    let hits = store
+        .recall(
+            "absence control",
+            10,
+            &rusty_brain::store::AgentFilter::All,
+            &unit(384, 0),
+        )
+        .await?;
     ensure!(
         hits.iter().all(|hit| hit.memory.id != id),
         "recall still contains row"
@@ -340,7 +465,15 @@ async fn forget_second_statement_fault_rolls_back_and_absence_controls_fail_whil
 -> Result<()> {
     let (dir, store) = open_store().await;
     let path = dir.path().join("brain.db");
-    let id = store.remember("absence control", "", &unit(384, 0)).await?;
+    let id = store
+        .remember(
+            "absence control",
+            "",
+            "test-agent",
+            "test-session",
+            &unit(384, 0),
+        )
+        .await?;
 
     assert!(
         assert_forgotten_absence(&store, &path, &id, 0)

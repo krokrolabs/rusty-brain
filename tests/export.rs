@@ -16,6 +16,8 @@ fn memory(id: &str, content: &str, tags: &str, created_at: &str) -> Memory {
         tags: tags.into(),
         embedding_model: "AllMiniLML6V2Q".into(),
         created_at: created_at.into(),
+        agent: "test-agent".into(),
+        session: "test-session".into(),
     }
 }
 
@@ -51,7 +53,7 @@ fn assert_parquet_matches(path: &Path, expected: &[(Memory, Vec<f32>)]) {
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let schema = builder.schema();
     let fields = schema.fields();
-    assert_eq!(fields.len(), 6);
+    assert_eq!(fields.len(), 8);
     assert_eq!(
         fields
             .iter()
@@ -63,11 +65,13 @@ fn assert_parquet_matches(path: &Path, expected: &[(Memory, Vec<f32>)]) {
             "tags",
             "embedding_model",
             "created_at",
+            "agent",
+            "session",
             "embedding"
         ]
     );
     assert_eq!(
-        fields[5].data_type(),
+        fields[7].data_type(),
         &DataType::FixedSizeList(
             Arc::new(arrow::datatypes::Field::new(
                 "item",
@@ -113,7 +117,7 @@ fn assert_parquet_matches(path: &Path, expected: &[(Memory, Vec<f32>)]) {
             .downcast_ref::<StringArray>()
             .unwrap();
         let embeddings = batch
-            .column(5)
+            .column(7)
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
             .unwrap();
@@ -122,7 +126,7 @@ fn assert_parquet_matches(path: &Path, expected: &[(Memory, Vec<f32>)]) {
             assert_eq!(ids.value(row), memory.id);
             assert_eq!(contents.value(row), memory.content);
             assert_eq!(tags.value(row), memory.tags);
-            assert_eq!(models.value(row), "AllMiniLML6V2Q");
+            assert_eq!(models.value(row), memory.embedding_model);
             assert_eq!(created.value(row), memory.created_at);
             let values = embeddings.value(row);
             let floats = values.as_any().downcast_ref::<Float32Array>().unwrap();
@@ -172,11 +176,11 @@ async fn reported_count_comes_from_selection_not_later_stats() {
     let store = Store::open(&db_path).await.unwrap();
     let embedding = vec![0.125; 384];
     store
-        .remember("selected one", "", &embedding)
+        .remember("selected one", "", "test-agent", "test-session", &embedding)
         .await
         .unwrap();
     store
-        .remember("selected two", "", &embedding)
+        .remember("selected two", "", "test-agent", "test-session", &embedding)
         .await
         .unwrap();
     let selected = store.all_for_export().await.unwrap();
@@ -185,7 +189,13 @@ async fn reported_count_comes_from_selection_not_later_stats() {
     // Deterministic interleaving: the source changes after selection. The
     // exported count must still describe this exact two-row snapshot.
     store
-        .remember("later concurrent row", "", &embedding)
+        .remember(
+            "later concurrent row",
+            "",
+            "test-agent",
+            "test-session",
+            &embedding,
+        )
         .await
         .unwrap();
     let source_before = std::fs::read(&db_path).unwrap();

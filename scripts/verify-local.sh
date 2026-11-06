@@ -94,7 +94,7 @@ TAGS=(
     'dsh'
 )
 IDS=()
-printf 'Priming AllMiniLML6V2Q once and storing exact fixture A-J\n'
+printf 'Priming BGESmallENV15Q once and storing exact fixture A-J\n'
 for i in "${!KEYS[@]}"; do
     ID="$(cd "$VERIFY_ROOT/work/project" && run_rb "$RUSTY_BRAIN_PROJECT" remember "${CONTENTS[$i]}" --tags "${TAGS[$i]}")"
     [[ "$ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]
@@ -168,7 +168,7 @@ recall = json.load(open(root / "recall-after.json", encoding="utf-8"))
 assert not absent(before), "active-row control did not make recent absence fail"
 assert absent(after) and absent(recall), "forgotten row remains in an active view"
 stats = json.load(open(root / "stats.json", encoding="utf-8"))
-assert stats["memories"] == 9 and stats["model"] == "AllMiniLML6V2Q" and stats["schema_version"] == 1
+assert stats["memories"] == 9 and stats["model"] == "BGESmallENV15Q" and stats["schema_version"] == 2
 print("forget: recent/recall absence controls passed; active stats=9")
 PY
 

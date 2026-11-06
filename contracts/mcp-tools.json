@@ -1,13 +1,13 @@
 {
   "catalogVersion": 1,
   "contractVersion": "initial-verified-v1",
-  "transport": "stdio",
-  "serverName": "rusty-brain",
+  "errorTextCapBytes": 4096,
   "localIdentity": [
     "serverName",
     "project",
     "cwd"
   ],
+  "outputCapBytes": 1000000,
   "protocolRevisions": [
     "2024-11-05",
     "2025-03-26",
@@ -15,26 +15,33 @@
     "2025-11-25",
     "2026-07-28"
   ],
-  "outputCapBytes": 1000000,
-  "errorTextCapBytes": 4096,
+  "serverName": "rusty-brain",
   "tools": [
     {
-      "name": "data_path",
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "confirmation": "not required; read-only",
       "description": "Return the exact paths of the brain file, model cache and project directory.",
       "effect": "read local data locations",
-      "risk": "reveals the selected local brain paths",
-      "scope": "local",
-      "requiredScopes": [],
-      "confirmation": "not required; read-only",
+      "hashes": {
+        "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6",
+        "description": "2c034cf1f5a4b4558f4309bbd1f1e90d3693480c3eec371699df3a2f6a7ba144",
+        "inputSchema": "0315fc123cf5b3495e854ac63c47aaff76b34851a87baa07a783533f93acfe57",
+        "outputSchema": "e1bbb6c808d199ca8b49e13ae36a824ff47257e85da7c12ed54c641e8f840d7f"
+      },
       "idempotency": "idempotent",
-      "outputCapBytes": 1000000,
-      "sharedOperation": "Config home/project/db_path",
-      "limits": {},
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "type": "object"
       },
+      "limits": {},
+      "name": "data_path",
+      "outputCapBytes": 1000000,
       "outputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -45,7 +52,6 @@
             "type": "string"
           },
           "model": {
-            "const": "AllMiniLML6V2Q",
             "type": "string"
           },
           "project": {
@@ -60,33 +66,28 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "hashes": {
-        "description": "2c034cf1f5a4b4558f4309bbd1f1e90d3693480c3eec371699df3a2f6a7ba144",
-        "inputSchema": "0315fc123cf5b3495e854ac63c47aaff76b34851a87baa07a783533f93acfe57",
-        "outputSchema": "12ed5fb75545ba3d5146fa100d0fd714c8d67672432b7cf948537e63113a6608",
-        "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6"
-      }
+      "requiredScopes": [],
+      "risk": "reveals the selected local brain paths",
+      "scope": "local",
+      "sharedOperation": "Config home/project/db_path"
     },
     {
-      "name": "forget",
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "confirmation": "explicit user-supplied UUID; no second handle under CT-4C",
       "description": "Remove a memory by id (soft delete; it disappears from recall and exports).",
       "effect": "soft-delete one local memory",
-      "risk": "destructive but recoverable local soft deletion",
-      "scope": "local",
-      "requiredScopes": [],
-      "confirmation": "explicit user-supplied UUID; no second handle under CT-4C",
-      "idempotency": "idempotent by canonical UUID; unknown or forgotten IDs are no-ops",
-      "outputCapBytes": 1000000,
-      "sharedOperation": "Brain::forget",
-      "limits": {
-        "id": "canonical hyphenated UUID"
+      "hashes": {
+        "annotations": "eac8ce4ef2f806dc71b6ab74b1b7f45db5d763fc21c243fac665161bb8d6fb60",
+        "description": "d7d71bbb167dee3288b91f3cfdf9dee2afc4342b5d9e98c8ed314e1389c5e2e9",
+        "inputSchema": "26e72c2c930082954fa84ab138fbc74bfc1a2ac44f710d30a83c7a19ef5314f0",
+        "outputSchema": "930092b418b6c9d5aea1334ac482b67b8dfd2e0672f027fd6eee07412eb4be30"
       },
+      "idempotency": "idempotent by canonical UUID; unknown or forgotten IDs are no-ops",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -101,6 +102,11 @@
         ],
         "type": "object"
       },
+      "limits": {
+        "id": "canonical hyphenated UUID"
+      },
+      "name": "forget",
+      "outputCapBytes": 1000000,
       "outputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -118,43 +124,39 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": false,
-        "destructiveHint": true,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "hashes": {
-        "description": "d7d71bbb167dee3288b91f3cfdf9dee2afc4342b5d9e98c8ed314e1389c5e2e9",
-        "inputSchema": "26e72c2c930082954fa84ab138fbc74bfc1a2ac44f710d30a83c7a19ef5314f0",
-        "outputSchema": "930092b418b6c9d5aea1334ac482b67b8dfd2e0672f027fd6eee07412eb4be30",
-        "annotations": "eac8ce4ef2f806dc71b6ab74b1b7f45db5d763fc21c243fac665161bb8d6fb60"
-      }
+      "requiredScopes": [],
+      "risk": "destructive but recoverable local soft deletion",
+      "scope": "local",
+      "sharedOperation": "Brain::forget"
     },
     {
-      "name": "recall",
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "confirmation": "not required; read-only",
       "description": "Recall relevant memories for this project (hybrid semantic + keyword search).",
       "effect": "read hybrid semantic and exact-keyword memories",
-      "risk": "returns local project memory content",
-      "scope": "local",
-      "requiredScopes": [],
-      "confirmation": "not required; read-only",
-      "idempotency": "idempotent",
-      "outputCapBytes": 1000000,
-      "sharedOperation": "Brain::recall",
-      "limits": {
-        "query": "trimmed non-empty; FTS operators escaped",
-        "limit": {
-          "default": 5,
-          "minimum": 0,
-          "maximum": 50
-        },
-        "truncated": false
+      "hashes": {
+        "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6",
+        "description": "371b806fd082ffa35d77207756dec1cdbb469ac350b2464224da6a92817a0876",
+        "inputSchema": "9a401979d8e4be2105e73d578318c1f115e4feda91ac70450650ffc2b2086757",
+        "outputSchema": "95efdb6b0080604c4f45af48af44ddac378ac773c58f5767fc34163db5b74bb0"
       },
+      "idempotency": "idempotent",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "properties": {
+          "agent": {
+            "description": "Recall scope: `all` (default), `self`, `others`, or an agent name.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "limit": {
             "description": "Maximum number of memories to return (default 5).",
             "format": "uint",
@@ -174,6 +176,17 @@
         ],
         "type": "object"
       },
+      "limits": {
+        "limit": {
+          "default": 5,
+          "maximum": 50,
+          "minimum": 0
+        },
+        "query": "trimmed non-empty; FTS operators escaped",
+        "truncated": false
+      },
+      "name": "recall",
+      "outputCapBytes": 1000000,
       "outputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -193,6 +206,9 @@
                 "memory": {
                   "additionalProperties": false,
                   "properties": {
+                    "agent": {
+                      "type": "string"
+                    },
                     "content": {
                       "type": "string"
                     },
@@ -201,11 +217,13 @@
                       "type": "string"
                     },
                     "embedding_model": {
-                      "const": "AllMiniLML6V2Q",
                       "type": "string"
                     },
                     "id": {
                       "format": "uuid",
+                      "type": "string"
+                    },
+                    "session": {
                       "type": "string"
                     },
                     "tags": {
@@ -217,7 +235,9 @@
                     "content",
                     "tags",
                     "embedding_model",
-                    "created_at"
+                    "created_at",
+                    "agent",
+                    "session"
                   ],
                   "type": "object"
                 },
@@ -246,34 +266,28 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "hashes": {
-        "description": "371b806fd082ffa35d77207756dec1cdbb469ac350b2464224da6a92817a0876",
-        "inputSchema": "75c4687ab00b2f4b4e0ed0a434522a0261482288c8c91efde29b90f2d752c544",
-        "outputSchema": "61c57edf1138d950a449f120f94a50fb26d2ca5ffd271e2854b018c6a61e1a0d",
-        "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6"
-      }
+      "requiredScopes": [],
+      "risk": "returns local project memory content",
+      "scope": "local",
+      "sharedOperation": "Brain::recall"
     },
     {
-      "name": "remember",
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "confirmation": "not required; explicit content is the request",
       "description": "Store a fact about this project in the local brain (embedded locally, no network).",
       "effect": "create one local project memory",
-      "risk": "adds durable local content and a local embedding",
-      "scope": "local",
-      "requiredScopes": [],
-      "confirmation": "not required; explicit content is the request",
-      "idempotency": "not idempotent; repeated calls create distinct UUIDs",
-      "outputCapBytes": 1000000,
-      "sharedOperation": "Brain::remember",
-      "limits": {
-        "content": "trimmed non-empty; at most 100000 UTF-8 bytes",
-        "tags": "optional comma-separated string"
+      "hashes": {
+        "annotations": "d72d3cb182e3d7fcf0b1c6782251eee772cdf2a99470e1a4bd6a006b5c8f4e25",
+        "description": "c8eef31127e5a4107ade48cc32e0025918bffed4c6e9c9277229bcbb984d0b99",
+        "inputSchema": "733c2703d945873a50adff2275d5e680af0efc72c2eb92e50af36eb783c844a6",
+        "outputSchema": "d1150878b25ddcbee65a41ce8161cffc618ac084c574c0ebfa27f68f38047ed0"
       },
+      "idempotency": "not idempotent; repeated calls create distinct UUIDs",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -295,6 +309,12 @@
         ],
         "type": "object"
       },
+      "limits": {
+        "content": "trimmed non-empty; at most 100000 UTF-8 bytes",
+        "tags": "optional comma-separated string"
+      },
+      "name": "remember",
+      "outputCapBytes": 1000000,
       "outputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -308,39 +328,53 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": false,
-        "destructiveHint": false,
-        "idempotentHint": false,
-        "openWorldHint": false
-      },
-      "hashes": {
-        "description": "c8eef31127e5a4107ade48cc32e0025918bffed4c6e9c9277229bcbb984d0b99",
-        "inputSchema": "733c2703d945873a50adff2275d5e680af0efc72c2eb92e50af36eb783c844a6",
-        "outputSchema": "d1150878b25ddcbee65a41ce8161cffc618ac084c574c0ebfa27f68f38047ed0",
-        "annotations": "d72d3cb182e3d7fcf0b1c6782251eee772cdf2a99470e1a4bd6a006b5c8f4e25"
-      }
+      "requiredScopes": [],
+      "risk": "adds durable local content and a local embedding",
+      "scope": "local",
+      "sharedOperation": "Brain::remember"
     },
     {
-      "name": "stats",
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "confirmation": "not required; read-only",
       "description": "Show the brain's size, model and file locations — where your data lives.",
       "effect": "read active count, model, schema and database size",
-      "risk": "reveals local database path and size",
-      "scope": "local",
-      "requiredScopes": [],
-      "confirmation": "not required; read-only",
+      "hashes": {
+        "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6",
+        "description": "25ff8e2ae281a4896ea99d0d068c0bd38d77b03aa61d0501e6f431a1e86c32ca",
+        "inputSchema": "0315fc123cf5b3495e854ac63c47aaff76b34851a87baa07a783533f93acfe57",
+        "outputSchema": "4ef1f23fb9dd8b1a94ca72f85f1ad381634b5453c088595d7f0aa37d16c4aca2"
+      },
       "idempotency": "idempotent",
-      "outputCapBytes": 1000000,
-      "sharedOperation": "Brain::stats",
-      "limits": {},
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "type": "object"
       },
+      "limits": {},
+      "name": "stats",
+      "outputCapBytes": 1000000,
       "outputSchema": {
         "additionalProperties": false,
         "properties": {
+          "by_agent": {
+            "items": {
+              "prefixItems": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
           "db_bytes": {
             "minimum": 0,
             "type": "integer"
@@ -353,11 +387,10 @@
             "type": "integer"
           },
           "model": {
-            "const": "AllMiniLML6V2Q",
             "type": "string"
           },
           "schema_version": {
-            "const": 1,
+            "const": 2,
             "type": "integer"
           }
         },
@@ -370,18 +403,11 @@
         ],
         "type": "object"
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      },
-      "hashes": {
-        "description": "25ff8e2ae281a4896ea99d0d068c0bd38d77b03aa61d0501e6f431a1e86c32ca",
-        "inputSchema": "0315fc123cf5b3495e854ac63c47aaff76b34851a87baa07a783533f93acfe57",
-        "outputSchema": "f93a7224c5517c2d7890761a893e9f21262ec16ad69d69d881b9680e854cc255",
-        "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6"
-      }
+      "requiredScopes": [],
+      "risk": "reveals local database path and size",
+      "scope": "local",
+      "sharedOperation": "Brain::stats"
     }
-  ]
+  ],
+  "transport": "stdio"
 }

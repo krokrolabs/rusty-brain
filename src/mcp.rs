@@ -50,7 +50,7 @@ pub fn canonical_json_bytes(value: &Value) -> anyhow::Result<Vec<u8>> {
     serde_json::to_vec(&normalize(value)?).map_err(Into::into)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
@@ -147,9 +147,10 @@ fn recall_output_schema() -> Arc<JsonObject> {
             "hits":{"type":"array","items":{
                 "type":"object","additionalProperties":false,"required":["memory","score","distance","matched_text"],
                 "properties":{
-                    "memory":{"type":"object","additionalProperties":false,"required":["id","content","tags","embedding_model","created_at"],"properties":{
+                    "memory":{"type":"object","additionalProperties":false,"required":["id","content","tags","embedding_model","created_at","agent","session"],"properties":{
                         "id":{"type":"string","format":"uuid"},"content":{"type":"string"},"tags":{"type":"string"},
-                        "embedding_model":{"type":"string","const":crate::config::MODEL_ID},"created_at":{"type":"string","format":"date-time"}
+                        "embedding_model":{"type":"string"},"created_at":{"type":"string","format":"date-time"},
+                        "agent":{"type":"string"},"session":{"type":"string"}
                     }},
                     "score":{"type":"number"},"distance":{"type":["number","null"]},"matched_text":{"type":"boolean"}
                 }
@@ -162,8 +163,9 @@ fn recall_output_schema() -> Arc<JsonObject> {
 fn stats_output_schema() -> Arc<JsonObject> {
     schema(
         json!({"type":"object","additionalProperties":false,"required":["memories","model","schema_version","db_path","db_bytes"],"properties":{
-            "memories":{"type":"integer","minimum":0},"model":{"type":"string","const":crate::config::MODEL_ID},
-            "schema_version":{"type":"integer","const":1},"db_path":{"type":"string"},"db_bytes":{"type":"integer","minimum":0}
+            "memories":{"type":"integer","minimum":0},"model":{"type":"string"},
+            "schema_version":{"type":"integer","const":2},"db_path":{"type":"string"},"db_bytes":{"type":"integer","minimum":0},
+            "by_agent":{"type":"array","items":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]}}
         }}),
     )
 }
@@ -171,7 +173,7 @@ fn stats_output_schema() -> Arc<JsonObject> {
 fn path_output_schema() -> Arc<JsonObject> {
     schema(
         json!({"type":"object","additionalProperties":false,"required":["home","brain_file","project","model"],"properties":{
-            "home":{"type":"string"},"brain_file":{"type":"string"},"project":{"type":"string"},"model":{"type":"string","const":crate::config::MODEL_ID}
+            "home":{"type":"string"},"brain_file":{"type":"string"},"project":{"type":"string"},"model":{"type":"string"}
         }}),
     )
 }
@@ -192,6 +194,8 @@ pub struct RecallArgs {
     pub query: String,
     /// Maximum number of memories to return (default 5).
     pub limit: Option<usize>,
+    /// Recall scope: `all` (default), `self`, `others`, or an agent name.
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -251,7 +255,11 @@ impl BrainServer {
     ) -> Result<CallToolResult, ErrorData> {
         match self
             .brain
-            .recall(&args.query, args.limit.unwrap_or(5))
+            .recall(
+                &args.query,
+                args.limit.unwrap_or(5),
+                self.brain.agent_filter(args.agent.as_deref()),
+            )
             .await
         {
             Ok(hits) => match serde_json::to_string(&hits) {
