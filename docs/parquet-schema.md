@@ -7,20 +7,22 @@ reported count is `rows.len()` from that exact selected row set, not a later
 
 ## Schema
 
-Every snapshot, including a zero-active-memory snapshot, has these six columns
-in this order:
+Every snapshot, including a zero-active-memory snapshot, has these eight columns
+in this order (the legacy six-column schema without provenance is still readable):
 
 | Column | Arrow type | Meaning |
 |---|---|---|
 | `id` | required `Utf8` | Canonical memory UUID |
 | `content` | required `Utf8` | Exact memory text, including non-ASCII UTF-8 |
 | `tags` | required `Utf8` | Comma-separated tags; the empty string is valid |
-| `embedding_model` | required `Utf8` | Always `AllMiniLML6V2Q` |
+| `embedding_model` | required `Utf8` | The brain's model (`BGESmallENV15Q` by default, `SnowflakeArcticEmbedMQ` after re-embed) |
 | `created_at` | required `Utf8` | UTC RFC 3339 creation timestamp |
-| `embedding` | required `FixedSizeList<Float32>(384)` | Exact 384 float32 values |
+| `agent` | required `Utf8` | Which agent wrote the memory (`claude-code`, `dsh`, `cli`, …); empty for legacy rows |
+| `session` | required `Utf8` | Session id/name when the harness provided one; empty otherwise |
+| `embedding` | required `FixedSizeList<Float32>(dim)` | Exact float32 values; `dim` is the brain's model width (384 or 768) |
 
-DuckDB 2.0.0 maps the last column to `FLOAT[]`; every returned array still has
-exactly 384 elements. The Rust contract tests assert the Arrow fixed-size list
+DuckDB 2.0.0 maps the last column to `FLOAT[]`; every returned array has exactly
+the brain's model width (384 for MiniLM/BGE, 768 for Arctic). The Rust contract tests assert the Arrow fixed-size list
 declaration even for zero rows. `scripts/verify_parquet.py` uses an isolated
 `duckdb==2.0.0` environment and compares every exported row and every float32
 value with the source database's raw little-endian vector bytes.

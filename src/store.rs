@@ -7,16 +7,18 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::{MODEL_DIM, MODEL_ID};
+use crate::config::{MODEL_ID, default_model, model_by_id};
 use crate::embed::to_vector_literal;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MAX_CONTENT_BYTES: usize = 100_000;
 const MAX_LIMIT: usize = 50;
 
 #[derive(Clone)]
 pub struct Store {
     conn: Connection,
+    model_id: String,
+    dim: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,6 +28,11 @@ pub struct Memory {
     pub tags: String,
     pub embedding_model: String,
     pub created_at: String,
+    /// Which agent wrote this memory (`claude-code`, `dsh`, `cli`, …).
+    /// Empty string means a brain that predates provenance tracking.
+    pub agent: String,
+    /// Session id/name when the harness provided one, else empty.
+    pub session: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +50,29 @@ pub struct Stats {
     pub schema_version: i64,
     pub db_path: String,
     pub db_bytes: u64,
+    pub by_agent: Vec<(String, i64)>,
+}
+
+/// Recall scoping: every memory, only the calling agent's, everyone else's,
+/// or one named agent's.
+#[derive(Clone, Debug)]
+pub enum AgentFilter {
+    All,
+    Own(String),
+    Others(String),
+    Named(String),
+}
+
+/// A row as re-embedding needs it: identity and content, no vectors.
+#[derive(Debug)]
+pub struct RawRow {
+    pub id: String,
+    pub content: String,
+    pub tags: String,
+    pub created_at: String,
+    pub deleted_at: Option<String>,
+    pub agent: String,
+    pub session: String,
 }
 
 pub fn validate_content(content: &str) -> Result<()> {
@@ -75,15 +105,30 @@ pub fn validate_memory_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn memory_from_row(row: &libsql::Row) -> Result<Memory> {
+    Ok(Memory {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        tags: row.get(2)?,
+        embedding_model: row.get(3)?,
+        created_at: row.get(4)?,
+        agent: row.get(5)?,
+        session: row.get(6)?,
+    })
+}
+
+const MEMORY_COLS: &str = "id, content, tags, embedding_model, created_at, agent, session";
+
 impl Store {
-    /// Validate an existing brain without running DDL or inserting metadata.
-    /// Returns false when the path does not exist and no database was opened.
-    pub async fn validate_existing_model(path: &Path) -> Result<bool> {
+    /// The model recorded in an existing brain, if the file exists. Returns
+    /// None when there is no brain yet; errors on a brain with no metadata or
+    /// an unregistered model (refusing to mix embedding spaces).
+    pub async fn model_of(path: &Path) -> Result<Option<String>> {
         if !path
             .try_exists()
             .with_context(|| format!("checking {}", path.display()))?
         {
-            return Ok(false);
+            return Ok(None);
         }
         let db = libsql::Builder::new_local(path)
             .build()
@@ -99,19 +144,36 @@ impl Store {
             .await?
             .context("existing brain has no embedding model metadata; refusing to modify it")?
             .get::<String>(0)?;
-        if recorded != MODEL_ID {
+        if model_by_id(&recorded).is_none() {
             bail!(
-                "this brain was created with model {recorded}, but this binary uses {MODEL_ID}; \
-                 refusing to mix embedding spaces"
+                "this brain was created with unknown model {recorded}; \
+                 refusing to mix embedding spaces (known models: {})",
+                crate::config::MODELS
+                    .iter()
+                    .map(|m| m.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
-        Ok(true)
+        Ok(Some(recorded))
     }
 
     pub async fn open(path: &Path) -> Result<Self> {
-        // An incompatible existing brain must be rejected before CREATE TABLE,
-        // CREATE VIRTUAL TABLE, metadata inserts, or any other database write.
-        Self::validate_existing_model(path).await?;
+        Self::open_with_model(path, None).await
+    }
+
+    /// Open (or create) a brain. `create_model` is only used for brand-new
+    /// brains; an existing brain always opens with its recorded model.
+    pub async fn open_with_model(
+        path: &Path,
+        create_model: Option<&'static crate::config::ModelSpec>,
+    ) -> Result<Self> {
+        let recorded = Self::model_of(path).await?;
+        let spec = match recorded.as_deref() {
+            Some(id) => model_by_id(id).expect("model_of validated the registry"),
+            None => create_model.unwrap_or_else(|| default_model()),
+        };
+        let dim = spec.dim;
         let db: Database = libsql::Builder::new_local(path)
             .build()
             .await
@@ -124,10 +186,12 @@ impl Store {
                 id TEXT PRIMARY KEY,
                 content TEXT NOT NULL,
                 tags TEXT NOT NULL DEFAULT '',
-                embedding F32_BLOB({MODEL_DIM}) NOT NULL,
+                embedding F32_BLOB({dim}) NOT NULL,
                 embedding_model TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                deleted_at TEXT
+                deleted_at TEXT,
+                agent TEXT NOT NULL DEFAULT '',
+                session TEXT NOT NULL DEFAULT ''
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED, content);
             "#
@@ -135,30 +199,70 @@ impl Store {
         .await
         .context("creating schema")?;
 
+        // Additive migration from schema 1 (no provenance column).
+        let mut cols = conn.query("PRAGMA table_info(memories)", ()).await?;
+        let mut has_agent = false;
+        while let Some(row) = cols.next().await? {
+            let name: String = row.get(1)?;
+            if name == "agent" {
+                has_agent = true;
+            }
+        }
+        if !has_agent {
+            conn.execute_batch(
+                "ALTER TABLE memories ADD COLUMN agent TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE memories ADD COLUMN session TEXT NOT NULL DEFAULT '';",
+            )
+            .await
+            .context("migrating schema 1 -> 2 (agent/session provenance)")?;
+        }
+
         let mut rows = conn
             .query("SELECT value FROM meta WHERE key = 'embedding_model'", ())
             .await?;
         if rows.next().await?.is_none() {
             conn.execute(
                 "INSERT INTO meta (key, value) VALUES ('embedding_model', ?1)",
-                params![MODEL_ID],
+                params![spec.id],
             )
             .await?;
         }
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION],
-        )
-        .await?;
-        Ok(Self { conn })
+        // Write only on an actual version change: a read-only open must not
+        // mutate the brain file (hash-stable reopening is part of the contract).
+        let mut version_rows = conn
+            .query("SELECT value FROM meta WHERE key = 'schema_version'", ())
+            .await?;
+        let current_version = match version_rows.next().await? {
+            Some(row) => Some(row.get::<String>(0)?),
+            None => None,
+        };
+        if current_version.as_deref() != Some(SCHEMA_VERSION.to_string().as_str()) {
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION],
+            )
+            .await?;
+        }
+        Ok(Self {
+            conn,
+            model_id: spec.id.to_string(),
+            dim,
+        })
     }
 
-    pub async fn remember(&self, content: &str, tags: &str, embedding: &[f32]) -> Result<String> {
+    pub async fn remember(
+        &self,
+        content: &str,
+        tags: &str,
+        agent: &str,
+        session: &str,
+        embedding: &[f32],
+    ) -> Result<String> {
         validate_content(content)?;
         ensure!(
-            embedding.len() == MODEL_DIM as usize
-                && embedding.iter().all(|value| value.is_finite()),
-            "embedding must contain exactly {MODEL_DIM} finite float32 values"
+            embedding.len() == self.dim as usize && embedding.iter().all(|v| v.is_finite()),
+            "embedding must contain exactly {} finite float32 values",
+            self.dim
         );
 
         let id = uuid::Uuid::new_v4().to_string();
@@ -170,15 +274,17 @@ impl Store {
             .await
             .context("starting remember transaction")?;
         tx.execute(
-            "INSERT INTO memories (id, content, tags, embedding, embedding_model, created_at)
-             VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6)",
+            "INSERT INTO memories (id, content, tags, embedding, embedding_model, created_at, agent, session)
+             VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7, ?8)",
             params![
                 id.as_str(),
                 content,
                 tags,
                 vector.as_str(),
-                MODEL_ID,
-                created_at.as_str()
+                self.model_id.as_str(),
+                created_at.as_str(),
+                agent,
+                session
             ],
         )
         .await
@@ -196,8 +302,14 @@ impl Store {
     }
 
     /// Hybrid recall: cosine top-k plus FTS5 matches, merged with reciprocal
-    /// rank fusion (k = 60).
-    pub async fn recall(&self, query: &str, limit: usize, embedding: &[f32]) -> Result<Vec<Hit>> {
+    /// rank fusion (k = 60), scoped by the agent filter.
+    pub async fn recall(
+        &self,
+        query: &str,
+        limit: usize,
+        filter: &AgentFilter,
+        embedding: &[f32],
+    ) -> Result<Vec<Hit>> {
         validate_query(query)?;
         validate_limit(limit)?;
         if limit == 0 {
@@ -205,13 +317,28 @@ impl Store {
         }
         let candidates = (limit * 4).max(20) as i64;
         let vector = to_vector_literal(embedding);
+        let (clause, agent_arg) = match filter {
+            AgentFilter::All => ("", None),
+            AgentFilter::Own(a) => ("AND agent = ?3", Some(a.clone())),
+            AgentFilter::Named(a) => ("AND agent = ?3", Some(a.clone())),
+            AgentFilter::Others(a) => ("AND agent <> ?3", Some(a.clone())),
+        };
 
         let mut sem = self
             .conn
             .query(
-                "SELECT id, vector_distance_cos(embedding, vector32(?1)) AS d
-                 FROM memories WHERE deleted_at IS NULL ORDER BY d ASC LIMIT ?2",
-                params![vector.as_str(), candidates],
+                &format!(
+                    "SELECT id, vector_distance_cos(embedding, vector32(?1)) AS d
+                     FROM memories WHERE deleted_at IS NULL {clause} ORDER BY d ASC LIMIT ?2"
+                ),
+                libsql::params_from_iter(
+                    [
+                        libsql::Value::from(vector.as_str()),
+                        libsql::Value::from(candidates),
+                    ]
+                    .into_iter()
+                    .chain(agent_arg.as_ref().map(|a| libsql::Value::from(a.as_str()))),
+                ),
             )
             .await?;
         let mut semantic_rank: Vec<(String, f64)> = Vec::new();
@@ -225,10 +352,19 @@ impl Store {
             let mut lex = self
                 .conn
                 .query(
-                    "SELECT f.id FROM memories_fts f JOIN memories m ON m.id = f.id
-                     WHERE memories_fts MATCH ?1 AND m.deleted_at IS NULL
-                     ORDER BY rank LIMIT ?2",
-                    params![fts_query.as_str(), candidates],
+                    &format!(
+                        "SELECT f.id FROM memories_fts f JOIN memories m ON m.id = f.id
+                         WHERE memories_fts MATCH ?1 AND m.deleted_at IS NULL {clause}
+                         ORDER BY rank LIMIT ?2"
+                    ),
+                    libsql::params_from_iter(
+                        [
+                            libsql::Value::from(fts_query.as_str()),
+                            libsql::Value::from(candidates),
+                        ]
+                        .into_iter()
+                        .chain(agent_arg.as_ref().map(|a| libsql::Value::from(a.as_str()))),
+                    ),
                 )
                 .await?;
             while let Some(row) = lex.next().await? {
@@ -279,19 +415,12 @@ impl Store {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, content, tags, embedding_model, created_at
-                 FROM memories WHERE id = ?1 AND deleted_at IS NULL",
+                &format!("SELECT {MEMORY_COLS} FROM memories WHERE id = ?1 AND deleted_at IS NULL"),
                 params![id],
             )
             .await?;
         match rows.next().await? {
-            Some(row) => Ok(Some(Memory {
-                id: row.get(0)?,
-                content: row.get(1)?,
-                tags: row.get(2)?,
-                embedding_model: row.get(3)?,
-                created_at: row.get(4)?,
-            })),
+            Some(row) => Ok(Some(memory_from_row(&row)?)),
             None => Ok(None),
         }
     }
@@ -328,20 +457,16 @@ impl Store {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, content, tags, embedding_model, created_at FROM memories
-                 WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?1",
+                &format!(
+                    "SELECT {MEMORY_COLS} FROM memories
+                     WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?1"
+                ),
                 params![limit as i64],
             )
             .await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
-            out.push(Memory {
-                id: row.get(0)?,
-                content: row.get(1)?,
-                tags: row.get(2)?,
-                embedding_model: row.get(3)?,
-                created_at: row.get(4)?,
-            });
+            out.push(memory_from_row(&row)?);
         }
         Ok(out)
     }
@@ -350,21 +475,17 @@ impl Store {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, content, tags, embedding_model, created_at, embedding
-                 FROM memories WHERE deleted_at IS NULL ORDER BY created_at ASC",
+                &format!(
+                    "SELECT {MEMORY_COLS}, embedding FROM memories
+                     WHERE deleted_at IS NULL ORDER BY created_at ASC"
+                ),
                 (),
             )
             .await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
-            let memory = Memory {
-                id: row.get(0)?,
-                content: row.get(1)?,
-                tags: row.get(2)?,
-                embedding_model: row.get(3)?,
-                created_at: row.get(4)?,
-            };
-            let blob: Vec<u8> = row.get(5)?;
+            let memory = memory_from_row(&row)?;
+            let blob: Vec<u8> = row.get(7)?;
             let floats = blob
                 .chunks_exact(4)
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -374,20 +495,96 @@ impl Store {
         Ok(out)
     }
 
+    /// The embedding width this brain was created with.
+    pub fn dim(&self) -> i64 {
+        self.dim
+    }
+
     pub async fn stats(&self, db_path: &Path) -> Result<Stats> {
         let mut rows = self
             .conn
             .query("SELECT count(*) FROM memories WHERE deleted_at IS NULL", ())
             .await?;
         let memories: i64 = rows.next().await?.context("stats row")?.get(0)?;
+        let mut by_agent_rows = self
+            .conn
+            .query(
+                "SELECT agent, count(*) FROM memories WHERE deleted_at IS NULL
+                 GROUP BY agent ORDER BY agent",
+                (),
+            )
+            .await?;
+        let mut by_agent = Vec::new();
+        while let Some(row) = by_agent_rows.next().await? {
+            by_agent.push((row.get(0)?, row.get(1)?));
+        }
         let db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
         Ok(Stats {
             memories,
-            model: MODEL_ID.to_string(),
+            model: self.model_id.clone(),
             schema_version: SCHEMA_VERSION,
             db_path: db_path.display().to_string(),
             db_bytes,
+            by_agent,
         })
+    }
+
+    /// Every row, including soft-deleted ones, without vectors: the input of a
+    /// re-embedding migration. Ids, timestamps and provenance are preserved.
+    pub async fn raw_rows(&self) -> Result<Vec<RawRow>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, content, tags, created_at, deleted_at, agent, session FROM memories
+                 ORDER BY created_at ASC",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(RawRow {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                tags: row.get(2)?,
+                created_at: row.get(3)?,
+                deleted_at: row.get(4)?,
+                agent: row.get(5)?,
+                session: row.get(6)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Insert a preserved row into a brain being re-embedded (no new id, no new
+    /// timestamps). FTS is rebuilt only for rows that are still active.
+    pub async fn insert_preserved(&self, row: &RawRow, embedding: &[f32]) -> Result<()> {
+        let vector = to_vector_literal(embedding);
+        let tx = self.conn.transaction().await?;
+        tx.execute(
+            "INSERT INTO memories (id, content, tags, embedding, embedding_model, created_at, deleted_at, agent, session)
+             VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7, ?8, ?9)",
+            params![
+                row.id.as_str(),
+                row.content.as_str(),
+                row.tags.as_str(),
+                vector.as_str(),
+                self.model_id.as_str(),
+                row.created_at.as_str(),
+                row.deleted_at.as_deref(),
+                row.agent.as_str(),
+                row.session.as_str()
+            ],
+        )
+        .await?;
+        if row.deleted_at.is_none() {
+            tx.execute(
+                "INSERT INTO memories_fts (id, content) VALUES (?1, ?2)",
+                params![row.id.as_str(), row.content.as_str()],
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }
 
@@ -400,3 +597,6 @@ fn fts_escape(query: &str) -> String {
         .collect::<Vec<_>>()
         .join(" OR ")
 }
+
+/// The default model id, re-exported for schema display in the MCP layer.
+pub const DEFAULT_MODEL_ID: &str = MODEL_ID;

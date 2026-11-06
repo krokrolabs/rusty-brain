@@ -34,13 +34,23 @@ pub fn export_with_fault(
     rows: &[(Memory, Vec<f32>)],
     fault: Option<ExportFault>,
 ) -> Result<(PathBuf, usize)> {
+    export_with_dim(dir, rows, MODEL_DIM as usize, fault)
+}
+
+/// Export with the brain's actual embedding dimension (384 for MiniLM/BGE,
+/// 768 for Arctic). Empty exports keep the declared schema either way.
+pub fn export_with_dim(
+    dir: &Path,
+    rows: &[(Memory, Vec<f32>)],
+    dim: usize,
+    fault: Option<ExportFault>,
+) -> Result<(PathBuf, usize)> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     ensure!(
-        rows.iter()
-            .all(|(_, vector)| vector.len() == MODEL_DIM as usize),
-        "every exported embedding must contain exactly {MODEL_DIM} float32 values"
+        rows.iter().all(|(_, vector)| vector.len() == dim),
+        "every exported embedding must contain exactly {dim} float32 values"
     );
-    let dim = MODEL_DIM as i32;
+    let dim = dim as i32;
     let value_field = Arc::new(Field::new("item", DataType::Float32, true));
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -48,6 +58,8 @@ pub fn export_with_fault(
         Field::new("tags", DataType::Utf8, false),
         Field::new("embedding_model", DataType::Utf8, false),
         Field::new("created_at", DataType::Utf8, false),
+        Field::new("agent", DataType::Utf8, false),
+        Field::new("session", DataType::Utf8, false),
         Field::new(
             "embedding",
             DataType::FixedSizeList(value_field.clone(), dim),
@@ -74,6 +86,8 @@ pub fn export_with_fault(
             col(|m| &m.tags),
             col(|m| &m.embedding_model),
             col(|m| &m.created_at),
+            col(|m| &m.agent),
+            col(|m| &m.session),
             Arc::new(embedding),
         ],
     )
@@ -160,7 +174,7 @@ fn cleanup_failed_write(temp_path: &Path, error: anyhow::Error) -> anyhow::Error
 }
 
 #[cfg(debug_assertions)]
-fn injected_fault() -> Result<Option<ExportFault>> {
+pub(crate) fn injected_fault() -> Result<Option<ExportFault>> {
     let Ok(value) = std::env::var("RUSTY_BRAIN_TEST_EXPORT_FAULT") else {
         return Ok(None);
     };
@@ -175,6 +189,6 @@ fn injected_fault() -> Result<Option<ExportFault>> {
 }
 
 #[cfg(not(debug_assertions))]
-fn injected_fault() -> Result<Option<ExportFault>> {
+pub(crate) fn injected_fault() -> Result<Option<ExportFault>> {
     Ok(None)
 }

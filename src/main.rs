@@ -20,6 +20,12 @@ struct Cli {
     /// Project name (default: derived from the current directory).
     #[arg(long, global = true)]
     project: Option<String>,
+    /// Agent identity recorded on memories (default: $RUSTY_BRAIN_AGENT or `cli`).
+    #[arg(long, global = true)]
+    agent: Option<String>,
+    /// Session id/name recorded on memories (default: $RUSTY_BRAIN_SESSION or empty).
+    #[arg(long, global = true)]
+    session: Option<String>,
     #[command(subcommand)]
     cmd: Command,
 }
@@ -39,6 +45,9 @@ enum Command {
         query: String,
         #[arg(short = 'n', long, default_value_t = 5)]
         limit: usize,
+        /// Recall scope: `all` (default), `self`, `others`, or an agent name.
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Soft-delete a memory by id.
     Forget { id: String },
@@ -53,6 +62,13 @@ enum Command {
     Path,
     /// Export memories to a new Parquet file (derived; the brain file stays the truth).
     Export,
+    /// Re-embed every memory with another model (preserves ids, tags, provenance).
+    Reembed {
+        /// Target model id (see `rusty-brain models`).
+        model: String,
+    },
+    /// List the supported embedding models.
+    Models,
 }
 
 #[tokio::main]
@@ -87,7 +103,7 @@ fn safe_diagnostic(error: &anyhow::Error) -> String {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let cfg = Config::new(cli.data_dir, cli.project)?;
+    let cfg = Config::new(cli.data_dir, cli.project, cli.agent, cli.session)?;
 
     // `path` needs no database and no model: always instant, always works.
     if matches!(cli.cmd, Command::Path) {
@@ -108,8 +124,14 @@ async fn run() -> Result<()> {
                 .await?;
             println!("{id}");
         }
-        Command::Recall { query, limit } => {
-            let hits = brain.recall(&query, limit).await?;
+        Command::Recall {
+            query,
+            limit,
+            agent,
+        } => {
+            let hits = brain
+                .recall(&query, limit, brain.agent_filter(agent.as_deref()))
+                .await?;
             println!("{}", serde_json::to_string_pretty(&hits)?);
         }
         Command::Forget { id } => {
@@ -131,6 +153,21 @@ async fn run() -> Result<()> {
         Command::Export => {
             let (path, count) = brain.export_parquet().await?;
             println!("exported {count} memories to {}", path.display());
+        }
+        Command::Reembed { model } => {
+            let report = brain.reembed(&model).await?;
+            println!(
+                "re-embedded {} memories: {} -> {} (old brain: {})",
+                report.memories,
+                report.from_model,
+                report.to_model,
+                report.backup_path.display()
+            );
+        }
+        Command::Models => {
+            for m in rusty_brain::config::MODELS {
+                println!("{} (dim {})", m.id, m.dim);
+            }
         }
         Command::Path => unreachable!(),
     }

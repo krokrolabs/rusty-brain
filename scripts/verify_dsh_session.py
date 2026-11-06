@@ -181,7 +181,7 @@ def evaluate(root: Path, token: str, task: str) -> dict[str, Any]:
 
             stats_payload = result_payload(by_call[calls[2]["data"]["callId"]])
             check(arguments[2] == {}, "stats arguments must be empty")
-            check(stats_payload.get("model") == "AllMiniLML6V2Q", "stats model mismatch")
+            check(stats_payload.get("model") == "BGESmallENV15Q", "stats model mismatch")
             check(isinstance(stats_payload.get("memories"), int) and stats_payload["memories"] >= 1, "stats did not include active memory")
 
             path_payload = result_payload(by_call[calls[3]["data"]["callId"]])
