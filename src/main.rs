@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -55,7 +56,36 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {}", safe_diagnostic(&error));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn safe_diagnostic(error: &anyhow::Error) -> String {
+    // anyhow's default main termination prints debug chains and, when enabled,
+    // stack backtraces. Print only the top-level actionable message instead.
+    let mut message = error.to_string();
+    for name in [
+        "HF_TOKEN",
+        "RB_TEST_SECRET",
+        "DEEPSEEK_API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+    ] {
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            message = message.replace(&value, "[redacted]");
+        }
+    }
+    message
+}
+
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Config::new(cli.data_dir, cli.project)?;
 
