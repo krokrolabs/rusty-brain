@@ -23,7 +23,18 @@ pub struct ReembedReport {
     pub from_model: String,
     pub to_model: String,
     pub memories: usize,
-    pub backup_path: PathBuf,
+    pub pruned_models: Vec<String>,
+}
+
+/// What to do with older models' vectors after a successful re-embed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Prune {
+    /// Keep every model's vectors (default; switch-back is a pointer flip).
+    Keep,
+    /// Delete only the previous model's vectors.
+    Old,
+    /// Delete every model's vectors except the new one.
+    All,
 }
 
 impl Brain {
@@ -157,14 +168,15 @@ impl Brain {
 
     /// Re-embed the whole brain with another model. Ids, tags, timestamps,
     /// provenance and soft-deletion state are preserved; vectors are always
-    /// regenerated, never reused. The old file is kept as a backup.
-    pub async fn reembed(&self, new_model_id: &str) -> Result<ReembedReport> {
+    /// regenerated, never reused. Old vectors stay in `memory_embeddings`, so
+    /// switching back is a pointer flip — nothing is deleted.
+    pub async fn reembed(&self, new_model_id: &str, prune: Prune) -> Result<ReembedReport> {
         let spec =
             model_by_id(new_model_id).with_context(|| format!("unknown model {new_model_id}"))?;
         let models = self.cfg.models_dir();
         let embedder = tokio::task::spawn_blocking(move || Embedder::new(&models, spec)).await??;
         let embedder = Mutex::new(embedder);
-        self.reembed_with(spec, move |text| {
+        self.reembed_with(spec, prune, move |text| {
             let mut guard = embedder
                 .lock()
                 .map_err(|_| anyhow::anyhow!("embedding model lock poisoned"))?;
@@ -178,6 +190,7 @@ impl Brain {
     pub async fn reembed_with(
         &self,
         spec: &'static ModelSpec,
+        prune: Prune,
         embed: impl Fn(String) -> Result<Vec<f32>>,
     ) -> Result<ReembedReport> {
         let db_path = self.cfg.db_path();
@@ -189,50 +202,39 @@ impl Brain {
         }
         let store = self.store().await?;
         let rows = store.raw_rows().await?;
-        let active = rows.iter().filter(|r| r.deleted_at.is_none()).count();
+        let total = rows.len();
 
-        let temp_path =
-            db_path.with_file_name(format!("brain.reembed-{}.db", uuid::Uuid::new_v4()));
-        let result = async {
-            let target = Store::open_with_model(&temp_path, Some(spec)).await?;
-            for row in &rows {
-                let embedding = embed(row.content.clone())?;
-                target.insert_preserved(row, &embedding).await?;
-            }
-            let stats = target.stats(&temp_path).await?;
-            anyhow::ensure!(
-                stats.memories as usize == active,
-                "re-embed count mismatch: {active} active rows in, {} out",
-                stats.memories
-            );
-            anyhow::ensure!(stats.model == spec.id, "re-embed model mismatch");
-            // Close the target connection before moving files around.
-            drop(target);
-            Ok::<_, anyhow::Error>(())
+        for row in &rows {
+            let embedding = embed(row.content.clone())?;
+            store
+                .insert_embedding(&row.id, spec.id, spec.dim, &embedding)
+                .await?;
         }
-        .await;
-        if let Err(error) = result {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(error);
-        }
-
-        let backup_path = db_path.with_file_name(format!("brain.bak-{from_model}.db"));
+        let written = store.count_embeddings(spec.id).await?;
         anyhow::ensure!(
-            !backup_path.exists(),
-            "backup already exists: {}",
-            backup_path.display()
+            written as usize == total,
+            "re-embed count mismatch: {total} rows in, {written} out"
         );
-        std::fs::rename(&db_path, &backup_path).context("backing up the old brain")?;
-        if let Err(error) = std::fs::rename(&temp_path, &db_path) {
-            // Restore the old brain so the project is never left without one.
-            let _ = std::fs::rename(&backup_path, &db_path);
-            return Err(error).context("publishing the re-embedded brain");
+        let mut pruned_models = Vec::new();
+        match prune {
+            Prune::Keep => {}
+            Prune::Old => {
+                store.delete_embeddings(&from_model).await?;
+                pruned_models.push(from_model.clone());
+            }
+            Prune::All => {
+                store.delete_other_embeddings(spec.id).await?;
+                if from_model != spec.id {
+                    pruned_models.push(from_model.clone());
+                }
+            }
         }
+        store.set_current_model(spec.id).await?;
         Ok(ReembedReport {
             from_model,
             to_model: spec.id.to_string(),
-            memories: active,
-            backup_path,
+            memories: total,
+            pruned_models,
         })
     }
 }

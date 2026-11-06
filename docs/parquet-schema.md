@@ -1,7 +1,9 @@
 # Parquet snapshot schema and publication
 
 `rusty-brain export` writes a derived snapshot of all and only the active rows in
-the current project brain. The selection is ordered by `created_at ASC`; the
+the current project brain. Each row carries **only the current model's embedding**
+(from `memory_embeddings`, filtered on `meta.current_model`); older models' vectors
+are never exported. The selection is ordered by `created_at ASC`; the
 reported count is `rows.len()` from that exact selected row set, not a later
 `stats` query. The SQLite/libsql brain remains the source of truth.
 

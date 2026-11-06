@@ -347,7 +347,7 @@
         "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6",
         "description": "25ff8e2ae281a4896ea99d0d068c0bd38d77b03aa61d0501e6f431a1e86c32ca",
         "inputSchema": "0315fc123cf5b3495e854ac63c47aaff76b34851a87baa07a783533f93acfe57",
-        "outputSchema": "4ef1f23fb9dd8b1a94ca72f85f1ad381634b5453c088595d7f0aa37d16c4aca2"
+        "outputSchema": "8b9a7e6351c177ab7c0a005a62798eae9030687c9529708e79a2a8e10beca9fd"
       },
       "idempotency": "idempotent",
       "inputSchema": {
@@ -389,8 +389,14 @@
           "model": {
             "type": "string"
           },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "schema_version": {
-            "const": 2,
+            "const": 3,
             "type": "integer"
           }
         },

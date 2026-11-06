@@ -40,6 +40,12 @@ async fn set_identity_and_time(conn: &Connection, old: &str, new: &str, created:
     )
     .await
     .unwrap();
+    conn.execute(
+        "UPDATE memory_embeddings SET memory_id = ?2 WHERE memory_id = ?1",
+        params![old, new],
+    )
+    .await
+    .unwrap();
 }
 
 async fn copy_fixture(name: &str) -> (tempfile::TempDir, PathBuf) {
@@ -353,7 +359,7 @@ async fn mismatched_model_is_refused_before_any_store_write() -> Result<()> {
     let (_db, conn) = raw_connection(&path).await;
     conn.execute("DROP TABLE memories_fts", ()).await?;
     conn.execute(
-        "UPDATE meta SET value = 'DifferentModel' WHERE key = 'embedding_model'",
+        "UPDATE meta SET value = 'DifferentModel' WHERE key IN ('embedding_model', 'current_model')",
         (),
     )
     .await?;
@@ -381,7 +387,10 @@ async fn mismatched_model_is_refused_before_any_store_write() -> Result<()> {
         "schema must not be created before model validation"
     );
     let mut rows = conn
-        .query("SELECT value FROM meta WHERE key = 'embedding_model'", ())
+        .query(
+            "SELECT value FROM meta WHERE key IN ('embedding_model', 'current_model')",
+            (),
+        )
         .await?;
     let value: String = rows.next().await?.context("model metadata")?.get(0)?;
     assert_eq!(value, "DifferentModel");

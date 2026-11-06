@@ -5,11 +5,11 @@ embeddings computed **on your machine**. No accounts, no API keys, no telemetry.
 
 ```mermaid
 flowchart LR
-    A["AI agent<br/>(Claude Code, dsh, …)"] <-->|"MCP over stdio"| B[rusty-brain]
+    A["AI agent<br/>(Claude Code, dsh, …)"] <-->|"MCP over stdio"| B["rusty-brain"]
     You["You (CLI)"] --> B
     B --> C[("brain.db<br/>one per project")]
     B --> D["Parquet snapshots<br/>(derived, optional)"]
-    B -.->|local ONNX model| E["fastembed<br/>no network at embed time"]
+    B -.->|"local ONNX model"| E["fastembed<br/>no network at embed time"]
 ```
 
 ## What it does
@@ -86,13 +86,13 @@ rusty-brain models               # supported embedding models
 ```mermaid
 flowchart LR
     subgraph harness["Your agent harness"]
-        C[Claude Code] 
-        D[dsh]
-        O[Other MCP client]
+        C["Claude Code"]
+        D["dsh"]
+        O["Other MCP client"]
     end
-    C -->|"claude mcp add rusty-brain -- rusty-brain serve"| S[rusty-brain serve]
+    C -->|"claude mcp add rusty-brain -- rusty-brain serve"| S["rusty-brain serve"]
     D -->|"cordis.yml patch<br/>dsh-mcp-client, stdio"| S
-    O -->|'{ "command": "rusty-brain", "args": ["serve"] }'| S
+    O -->|"stdio MCP config"| S
     S --> B[("brain.db<br/>scoped to the project dir")]
 ```
 
@@ -124,14 +124,17 @@ rusty-brain reembed SnowflakeArcticEmbedMQ  # re-embed with a better/larger mode
 
 ```mermaid
 flowchart LR
-    A[brain.db<br/>old model] --> R[reembed]
-    R --> N[brain.db<br/>new model, same ids/tags/provenance]
-    R --> K[brain.bak-&lt;oldmodel&gt;.db<br/>backup kept]
-    N --> E[exports/*.parquet<br/>DuckDB, pandas, Spark]
+    A["brain.db<br/>old model"] --> R["reembed"]
+    R --> N["brain.db<br/>new model, same ids/tags/provenance"]
+    R --> K["memory_embeddings<br/>old vectors kept (--prune to remove)"]
+    N --> E["exports/*.parquet<br/>current model only — DuckDB, pandas, Spark"]
 ```
 
 Re-embedding **regenerates every vector** (old vectors are never reused) and
-keeps ids, tags, timestamps, agent and session. The old brain is kept as a backup.
+keeps ids, tags, timestamps, agent and session. Old models' vectors stay in
+`memory_embeddings`, so switching back is a pointer flip. To remove them:
+`reembed <model> --prune` (previous model only) or `--prune-all` (every older model).
+Exports include **only the current model's embedding** per memory.
 
 ## Troubleshooting
 

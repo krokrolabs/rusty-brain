@@ -164,8 +164,9 @@ fn stats_output_schema() -> Arc<JsonObject> {
     schema(
         json!({"type":"object","additionalProperties":false,"required":["memories","model","schema_version","db_path","db_bytes"],"properties":{
             "memories":{"type":"integer","minimum":0},"model":{"type":"string"},
-            "schema_version":{"type":"integer","const":2},"db_path":{"type":"string"},"db_bytes":{"type":"integer","minimum":0},
-            "by_agent":{"type":"array","items":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]}}
+            "schema_version":{"type":"integer","const":3},"db_path":{"type":"string"},"db_bytes":{"type":"integer","minimum":0},
+            "by_agent":{"type":"array","items":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]}},
+            "models":{"type":"array","items":{"type":"string"}}
         }}),
     )
 }

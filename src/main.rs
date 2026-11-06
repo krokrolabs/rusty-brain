@@ -66,6 +66,12 @@ enum Command {
     Reembed {
         /// Target model id (see `rusty-brain models`).
         model: String,
+        /// Delete the previous model's vectors after a successful migration.
+        #[arg(long)]
+        prune: bool,
+        /// Delete every older model's vectors after a successful migration.
+        #[arg(long)]
+        prune_all: bool,
     },
     /// List the supported embedding models.
     Models,
@@ -154,14 +160,27 @@ async fn run() -> Result<()> {
             let (path, count) = brain.export_parquet().await?;
             println!("exported {count} memories to {}", path.display());
         }
-        Command::Reembed { model } => {
-            let report = brain.reembed(&model).await?;
+        Command::Reembed {
+            model,
+            prune,
+            prune_all,
+        } => {
+            let mode = if prune_all {
+                rusty_brain::app::Prune::All
+            } else if prune {
+                rusty_brain::app::Prune::Old
+            } else {
+                rusty_brain::app::Prune::Keep
+            };
+            let report = brain.reembed(&model, mode).await?;
+            let note = if report.pruned_models.is_empty() {
+                "old vectors kept (switch-back is a pointer flip)".to_string()
+            } else {
+                format!("pruned: {}", report.pruned_models.join(", "))
+            };
             println!(
-                "re-embedded {} memories: {} -> {} (old brain: {})",
-                report.memories,
-                report.from_model,
-                report.to_model,
-                report.backup_path.display()
+                "re-embedded {} memories: {} -> {} ({note})",
+                report.memories, report.from_model, report.to_model
             );
         }
         Command::Models => {

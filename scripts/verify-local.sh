@@ -168,7 +168,7 @@ recall = json.load(open(root / "recall-after.json", encoding="utf-8"))
 assert not absent(before), "active-row control did not make recent absence fail"
 assert absent(after) and absent(recall), "forgotten row remains in an active view"
 stats = json.load(open(root / "stats.json", encoding="utf-8"))
-assert stats["memories"] == 9 and stats["model"] == "BGESmallENV15Q" and stats["schema_version"] == 2
+assert stats["memories"] == 9 and stats["model"] == "BGESmallENV15Q" and stats["schema_version"] == 3
 print("forget: recent/recall absence controls passed; active stats=9")
 PY
 
