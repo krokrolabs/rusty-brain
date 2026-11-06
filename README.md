@@ -189,4 +189,5 @@ evidence: [docs/verification.md](docs/verification.md).
 
 Docs: [Parquet schema](docs/parquet-schema.md) ·
 [MCP compatibility](docs/mcp-compatibility.md) ·
-[stack & learnings](https://github.com/cryolake/leki-context-hub/tree/main/specs/006-rusty-brain-local-verify)
+[models & licenses](docs/models.md) ·
+  [stack & learnings](https://github.com/cryolake/leki-context-hub/tree/main/specs/006-rusty-brain-local-verify)
