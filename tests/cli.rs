@@ -136,6 +136,64 @@ fn zero_limits_succeed_and_51_fails_without_success_stdout() {
 }
 
 #[test]
+fn prune_flags_conflict_before_any_model_or_database_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("isolated-root");
+    let output = command(&root, "cli-contract")
+        .args(["reembed", "BGESmallENV15Q", "--prune", "--prune-all"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stdout(&output).is_empty());
+    let diagnostic = stderr(&output);
+    assert!(diagnostic.contains("cannot be used with"), "{diagnostic}");
+    assert!(!root.exists());
+}
+
+#[tokio::test]
+async fn use_model_flips_only_a_fully_covered_pointer_without_model_loading() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("isolated-root");
+    let project = "cli-contract";
+    let project_dir = root.join("projects").join(project);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let path = project_dir.join("brain.db");
+    let store = rusty_brain::store::Store::open(&path).await.unwrap();
+    let id = store
+        .remember("retained vectors", "", "a", "s", &vec![0.0; 384])
+        .await
+        .unwrap();
+    store
+        .insert_embedding(&id, "AllMiniLML6V2Q", 384, &vec![0.25; 384])
+        .await
+        .unwrap();
+    drop(store);
+
+    let output = command(&root, project)
+        .args(["use-model", "AllMiniLML6V2Q"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("BGESmallENV15Q -> AllMiniLML6V2Q"));
+
+    let output = command(&root, project)
+        .args(["use-model", "SnowflakeArcticEmbedMQ"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("every active memory"));
+    let stats = command(&root, project).arg("stats").output().unwrap();
+    assert!(stdout(&stats).contains("AllMiniLML6V2Q"));
+
+    let output = command(&root, project)
+        .args(["use-model", "BGESmallENV15Q"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("AllMiniLML6V2Q -> BGESmallENV15Q"));
+}
+
+#[test]
 fn invalid_inputs_are_actionable_and_safe_with_leaking_control() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("isolated-root");

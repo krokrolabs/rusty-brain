@@ -376,6 +376,32 @@ if [[ "$BEFORE_FILES" == "$(snapshot_exports)" ]]; then
 fi
 rm "$EXPORT_DIR/memories-planted-final.parquet"
 [[ "$BEFORE_FILES" == "$(snapshot_exports)" ]]
-printf 'H2 confirmed: populated/zero/base schemas and all vectors verified through DuckDB 2.0.0\n'
+printf 'Regenerating real 768-wide Arctic vectors and checking pointer-only model switches\n'
+set +e
+run_rb "$RUSTY_BRAIN_PROJECT" use-model SnowflakeArcticEmbedMQ \
+    >"$VERIFY_ROOT/use-model-uncovered.stdout" 2>"$VERIFY_ROOT/use-model-uncovered.stderr"
+UNCOVERED_STATUS=$?
+set -e
+[[ "$UNCOVERED_STATUS" -ne 0 && ! -s "$VERIFY_ROOT/use-model-uncovered.stdout" ]]
+grep -q 'every active memory' "$VERIFY_ROOT/use-model-uncovered.stderr"
+run_rb "$RUSTY_BRAIN_PROJECT" reembed SnowflakeArcticEmbedMQ > "$VERIFY_ROOT/reembed-arctic.stdout"
+run_rb "$RUSTY_BRAIN_PROJECT" stats > "$VERIFY_ROOT/stats-arctic.json"
+uv run --no-project python -I - "$VERIFY_ROOT/stats-arctic.json" <<'PY'
+import json, sys
+stats = json.load(open(sys.argv[1], encoding="utf-8"))
+assert stats["model"] == "SnowflakeArcticEmbedMQ" and stats["memories"] == 9
+assert set(stats["models"]) == {"BGESmallENV15Q", "SnowflakeArcticEmbedMQ"}
+print("Arctic migration: active pointer switched; BGE vectors retained")
+PY
+run_rb "$RUSTY_BRAIN_PROJECT" export > "$VERIFY_ROOT/export-arctic.stdout"
+PARSED="$(uv run --no-project python -I -c 'import re,sys; m=re.fullmatch(r"exported (\d+) memories to (.+)", open(sys.argv[1]).read().strip()); assert m; print(m[2] + "|" + m[1])' "$VERIFY_ROOT/export-arctic.stdout")"
+IFS='|' read -r ARCTIC_EXPORT_PATH ARCTIC_EXPORT_COUNT <<< "$PARSED"
+uv run --isolated "$RB/scripts/verify_parquet.py" --db "$MAIN_DB" --parquet "$ARCTIC_EXPORT_PATH" --reported-count "$ARCTIC_EXPORT_COUNT"
+run_rb "$RUSTY_BRAIN_PROJECT" use-model BGESmallENV15Q > "$VERIFY_ROOT/use-model-bge.stdout"
+[[ "$(run_rb "$RUSTY_BRAIN_PROJECT" stats | uv run --no-project python -I -c 'import json,sys; print(json.load(sys.stdin)["model"])')" == "BGESmallENV15Q" ]]
+run_rb "$RUSTY_BRAIN_PROJECT" use-model SnowflakeArcticEmbedMQ > "$VERIFY_ROOT/use-model-arctic.stdout"
+run_rb "$RUSTY_BRAIN_PROJECT" use-model BGESmallENV15Q > "$VERIFY_ROOT/use-model-final.stdout"
+printf 'model switching: incomplete use-model refused; real Arctic export=768; retained-vector switches passed\n'
+printf 'H2 confirmed: populated/zero/base schemas plus real 384/768 vectors verified through DuckDB 2.0.0\n'
 printf 'H1 confirmed: six sandboxed fresh-process embedding operations; zero ready-cache attempts; empty-cache control observed\n'
 printf 'CLI/store/export verification passed; evidence root: %s\n' "$VERIFY_ROOT"

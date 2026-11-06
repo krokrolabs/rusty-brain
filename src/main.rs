@@ -67,11 +67,16 @@ enum Command {
         /// Target model id (see `rusty-brain models`).
         model: String,
         /// Delete the previous model's vectors after a successful migration.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "prune_all")]
         prune: bool,
         /// Delete every older model's vectors after a successful migration.
         #[arg(long)]
         prune_all: bool,
+    },
+    /// Switch to a model whose vectors already cover every active memory.
+    UseModel {
+        /// Existing model id to select without re-embedding.
+        model: String,
     },
     /// List the supported embedding models.
     Models,
@@ -174,7 +179,7 @@ async fn run() -> Result<()> {
             };
             let report = brain.reembed(&model, mode).await?;
             let note = if report.pruned_models.is_empty() {
-                "old vectors kept (switch-back is a pointer flip)".to_string()
+                "old vectors kept (use-model switches back without re-embedding)".to_string()
             } else {
                 format!("pruned: {}", report.pruned_models.join(", "))
             };
@@ -182,6 +187,14 @@ async fn run() -> Result<()> {
                 "re-embedded {} memories: {} -> {} ({note})",
                 report.memories, report.from_model, report.to_model
             );
+        }
+        Command::UseModel { model } => {
+            let from = brain.use_model(&model).await?;
+            if from == model {
+                println!("brain already uses {model}");
+            } else {
+                println!("switched model: {from} -> {model} (existing vectors; no re-embedding)");
+            }
         }
         Command::Models => {
             for m in rusty_brain::config::MODELS {

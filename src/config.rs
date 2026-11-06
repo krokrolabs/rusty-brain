@@ -93,6 +93,8 @@ impl Config {
         let session = session
             .or_else(|| std::env::var("RUSTY_BRAIN_SESSION").ok())
             .unwrap_or_default();
+        crate::store::validate_provenance("agent", &agent)?;
+        crate::store::validate_provenance("session", &session)?;
         Ok(Self {
             home,
             project,
@@ -118,12 +120,35 @@ impl Config {
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
-        std::fs::create_dir_all(self.project_dir())
-            .with_context(|| format!("creating {}", self.project_dir().display()))?;
-        std::fs::create_dir_all(self.models_dir())
-            .with_context(|| format!("creating {}", self.models_dir().display()))?;
+        ensure_private_dir(&self.home)?;
+        ensure_private_dir(&self.home.join("projects"))?;
+        ensure_private_dir(&self.project_dir())?;
+        ensure_private_dir(&self.models_dir())?;
         Ok(())
     }
+}
+
+pub fn ensure_private_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("securing directory {}", path.display()))?;
+    }
+    Ok(())
+}
+
+pub fn set_private_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing file {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn default_home() -> Result<PathBuf> {
