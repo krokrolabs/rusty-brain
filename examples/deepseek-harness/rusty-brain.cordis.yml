@@ -1,0 +1,14 @@
+# Mount rusty-brain as the memory server of a deepseek-harness (dsh) agent.
+# Same pattern as the harness's own examples/mcp-memory/*.cordis.yml.
+# Install rusty-brain first (`cargo install --path .` in the rusty-brain repo).
+# The brain is scoped to the project directory dsh runs in; data lives under
+# ~/.rusty-brain (override with RUSTY_BRAIN_HOME).
+- insert:
+    - id: memory-rusty-brain
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: rusty-brain
+        transport: stdio
+        command: rusty-brain
+        args: [serve]
+        cwd: !!js process.cwd()
