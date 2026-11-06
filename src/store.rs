@@ -1,7 +1,7 @@
 //! The brain file: one libsql (SQLite) database per project. This is the only
 //! source of truth; Parquet exports are derived artifacts and can be rebuilt.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use libsql::{Connection, Database, params};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,6 +11,8 @@ use crate::config::{MODEL_DIM, MODEL_ID};
 use crate::embed::to_vector_literal;
 
 const SCHEMA_VERSION: i64 = 1;
+const MAX_CONTENT_BYTES: usize = 100_000;
+const MAX_LIMIT: usize = 50;
 
 #[derive(Clone)]
 pub struct Store {
@@ -43,8 +45,73 @@ pub struct Stats {
     pub db_bytes: u64,
 }
 
+pub fn validate_content(content: &str) -> Result<()> {
+    ensure!(
+        !content.trim().is_empty(),
+        "memory content must not be empty"
+    );
+    ensure!(
+        content.len() <= MAX_CONTENT_BYTES,
+        "memory content exceeds {MAX_CONTENT_BYTES} bytes"
+    );
+    Ok(())
+}
+
+pub fn validate_query(query: &str) -> Result<()> {
+    ensure!(!query.trim().is_empty(), "recall query must not be empty");
+    Ok(())
+}
+
+pub fn validate_limit(limit: usize) -> Result<()> {
+    ensure!(limit <= MAX_LIMIT, "limit must be between 0 and 50");
+    Ok(())
+}
+
+pub fn validate_memory_id(id: &str) -> Result<()> {
+    let parsed = uuid::Uuid::parse_str(id)
+        .ok()
+        .filter(|uuid| uuid.hyphenated().to_string() == id);
+    ensure!(parsed.is_some(), "memory id must be a canonical UUID");
+    Ok(())
+}
+
 impl Store {
+    /// Validate an existing brain without running DDL or inserting metadata.
+    /// Returns false when the path does not exist and no database was opened.
+    pub async fn validate_existing_model(path: &Path) -> Result<bool> {
+        if !path
+            .try_exists()
+            .with_context(|| format!("checking {}", path.display()))?
+        {
+            return Ok(false);
+        }
+        let db = libsql::Builder::new_local(path)
+            .build()
+            .await
+            .with_context(|| format!("opening existing brain at {}", path.display()))?;
+        let conn = db.connect().context("connecting to existing brain")?;
+        let mut rows = conn
+            .query("SELECT value FROM meta WHERE key = 'embedding_model'", ())
+            .await
+            .context("reading embedding model metadata")?;
+        let recorded = rows
+            .next()
+            .await?
+            .context("existing brain has no embedding model metadata; refusing to modify it")?
+            .get::<String>(0)?;
+        if recorded != MODEL_ID {
+            bail!(
+                "this brain was created with model {recorded}, but this binary uses {MODEL_ID}; \
+                 refusing to mix embedding spaces"
+            );
+        }
+        Ok(true)
+    }
+
     pub async fn open(path: &Path) -> Result<Self> {
+        // An incompatible existing brain must be rejected before CREATE TABLE,
+        // CREATE VIRTUAL TABLE, metadata inserts, or any other database write.
+        Self::validate_existing_model(path).await?;
         let db: Database = libsql::Builder::new_local(path)
             .build()
             .await
@@ -68,20 +135,10 @@ impl Store {
         .await
         .context("creating schema")?;
 
-        // A brain is created by one model, forever. Mixing embedding spaces
-        // would return plausible-looking garbage instead of an error.
         let mut rows = conn
             .query("SELECT value FROM meta WHERE key = 'embedding_model'", ())
             .await?;
-        if let Some(row) = rows.next().await? {
-            let recorded: String = row.get(0)?;
-            if recorded != MODEL_ID {
-                bail!(
-                    "this brain was created with model {recorded}, but this binary uses {MODEL_ID}; \
-                     refusing to mix embedding spaces"
-                );
-            }
-        } else {
+        if rows.next().await?.is_none() {
             conn.execute(
                 "INSERT INTO meta (key, value) VALUES ('embedding_model', ?1)",
                 params![MODEL_ID],
@@ -97,36 +154,55 @@ impl Store {
     }
 
     pub async fn remember(&self, content: &str, tags: &str, embedding: &[f32]) -> Result<String> {
+        validate_content(content)?;
+        ensure!(
+            embedding.len() == MODEL_DIM as usize
+                && embedding.iter().all(|value| value.is_finite()),
+            "embedding must contain exactly {MODEL_DIM} finite float32 values"
+        );
+
         let id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         let vector = to_vector_literal(embedding);
-        self.conn
-            .execute(
-                "INSERT INTO memories (id, content, tags, embedding, embedding_model, created_at)
-                 VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6)",
-                params![
-                    id.as_str(),
-                    content,
-                    tags,
-                    vector.as_str(),
-                    MODEL_ID,
-                    created_at.as_str()
-                ],
-            )
+        let tx = self
+            .conn
+            .transaction()
             .await
-            .context("inserting memory")?;
-        self.conn
-            .execute(
-                "INSERT INTO memories_fts (id, content) VALUES (?1, ?2)",
-                params![id.as_str(), content],
-            )
-            .await?;
+            .context("starting remember transaction")?;
+        tx.execute(
+            "INSERT INTO memories (id, content, tags, embedding, embedding_model, created_at)
+             VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6)",
+            params![
+                id.as_str(),
+                content,
+                tags,
+                vector.as_str(),
+                MODEL_ID,
+                created_at.as_str()
+            ],
+        )
+        .await
+        .context("inserting memory")?;
+        tx.execute(
+            "INSERT INTO memories_fts (id, content) VALUES (?1, ?2)",
+            params![id.as_str(), content],
+        )
+        .await
+        .context("inserting search index")?;
+        tx.commit()
+            .await
+            .context("committing remember transaction")?;
         Ok(id)
     }
 
     /// Hybrid recall: cosine top-k plus FTS5 matches, merged with reciprocal
     /// rank fusion (k = 60).
     pub async fn recall(&self, query: &str, limit: usize, embedding: &[f32]) -> Result<Vec<Hit>> {
+        validate_query(query)?;
+        validate_limit(limit)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let candidates = (limit * 4).max(20) as i64;
         let vector = to_vector_literal(embedding);
 
@@ -178,21 +254,24 @@ impl Store {
             entry.matched_text = true;
         }
 
-        let mut ordered: Vec<(String, Merge)> = merged.into_iter().collect();
-        ordered.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
-        ordered.truncate(limit);
-
-        let mut hits = Vec::with_capacity(ordered.len());
-        for (id, m) in ordered {
+        let mut hits = Vec::with_capacity(merged.len());
+        for (id, merged) in merged {
             if let Some(memory) = self.get(&id).await? {
                 hits.push(Hit {
                     memory,
-                    score: m.score,
-                    distance: m.distance,
-                    matched_text: m.matched_text,
+                    score: merged.score,
+                    distance: merged.distance,
+                    matched_text: merged.matched_text,
                 });
             }
         }
+        hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.memory.created_at.cmp(&b.memory.created_at))
+                .then_with(|| a.memory.id.cmp(&b.memory.id))
+        });
+        hits.truncate(limit);
         Ok(hits)
     }
 
@@ -218,23 +297,34 @@ impl Store {
     }
 
     pub async fn forget(&self, id: &str) -> Result<bool> {
+        validate_memory_id(id)?;
         let now = chrono::Utc::now().to_rfc3339();
-        let changed = self
+        let tx = self
             .conn
+            .transaction()
+            .await
+            .context("starting forget transaction")?;
+        let changed = tx
             .execute(
                 "UPDATE memories SET deleted_at = ?2 WHERE id = ?1 AND deleted_at IS NULL",
                 params![id, now.as_str()],
             )
-            .await?;
+            .await
+            .context("soft-deleting memory")?;
         if changed > 0 {
-            self.conn
-                .execute("DELETE FROM memories_fts WHERE id = ?1", params![id])
-                .await?;
+            tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])
+                .await
+                .context("deleting search index")?;
         }
+        tx.commit().await.context("committing forget transaction")?;
         Ok(changed > 0)
     }
 
     pub async fn recent(&self, limit: usize) -> Result<Vec<Memory>> {
+        validate_limit(limit)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut rows = self
             .conn
             .query(

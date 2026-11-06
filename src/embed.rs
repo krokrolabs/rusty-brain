@@ -12,6 +12,8 @@ pub struct Embedder {
 
 impl Embedder {
     pub fn new(models_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(models_dir)
+            .with_context(|| format!("creating model cache at {}", models_dir.display()))?;
         let model = TextEmbedding::try_new(
             TextInitOptions::new(EmbeddingModel::AllMiniLML6V2Q)
                 .with_cache_dir(models_dir.to_path_buf())
