@@ -190,6 +190,9 @@ def evaluate(root: Path, token: str, task: str) -> dict[str, Any]:
             check(path_payload.get("home") == str(root / "home"), "data_path home did not resolve isolated root")
             check(path_payload.get("project") == "rb-dsh-e2e", "data_path project override mismatch")
             check(path_payload.get("brain_file") == str(expected_db), "data_path brain path mismatch")
+            check(path_payload.get("model") == "BGESmallENV15Q", "data_path active model mismatch")
+            check(path_payload.get("models_dir") == str(root / "home/models"), "data_path models_dir mismatch")
+            check(path_payload.get("project_dir") == str(root / "home/projects/rb-dsh-e2e"), "data_path project_dir mismatch")
 
             check(arguments[4] == {"id": memory_id}, "forget did not use remember's exact UUID")
             forgotten = result_payload(by_call[calls[4]["data"]["callId"]])
@@ -203,17 +206,23 @@ def evaluate(root: Path, token: str, task: str) -> dict[str, Any]:
             failures.append(f"tool payload validation failed: {error}")
 
     active_count = -1
+    stored_agent = ""
+    stored_session = ""
     db_path = root / "home/projects/rb-dsh-e2e/brain.db"
     try:
         uri = f"file:{db_path}?mode=ro"
         with sqlite3.connect(uri, uri=True) as connection:
             row = connection.execute(
-                "SELECT content, deleted_at FROM memories WHERE id = ?", (memory_id,)
+                "SELECT content, deleted_at, agent, session FROM memories WHERE id = ?", (memory_id,)
             ).fetchone()
             check(row is not None, "independent DB has no remembered source row")
             if row is not None:
                 check(row[0] == f"Verification token: {token}", "independent DB content mismatch")
                 check(row[1] is not None, "independent DB source row is not soft-deleted")
+                stored_agent = row[2]
+                stored_session = row[3]
+                check(stored_agent == "dsh", f"live memory agent is {stored_agent!r}, not 'dsh'")
+                check(stored_session == "dsh-headless", f"live memory session is {stored_session!r}, not 'dsh-headless'")
             active_count = connection.execute("SELECT count(*) FROM memories WHERE deleted_at IS NULL").fetchone()[0]
             check(connection.execute("SELECT count(*) FROM memories WHERE content LIKE ? AND deleted_at IS NULL", (f"%{token}%",)).fetchone()[0] == 0, "active DB still contains token")
             check(connection.execute("SELECT count(*) FROM memories_fts WHERE id = ?", (memory_id,)).fetchone()[0] == 0, "forgotten memory remains in FTS")
@@ -247,6 +256,8 @@ def evaluate(root: Path, token: str, task: str) -> dict[str, Any]:
         "session": str(session),
         "memoryId": memory_id,
         "activeCountAfterForget": active_count,
+        "storedAgent": stored_agent,
+        "storedSession": stored_session,
         "toolCalls": {"total": len(calls), "perTool": dict(sorted(counts.items()))},
         "tokenUsage": usage_totals(events[1:]),
         "task": task,

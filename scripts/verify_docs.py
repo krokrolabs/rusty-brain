@@ -41,7 +41,7 @@ README_REQUIRED = (
     "claude mcp add rusty-brain",
     "RUSTY_BRAIN_AGENT",
     "RUSTY_BRAIN_SESSION",
-    "brain.bak-",
+    "memory_embeddings", "--prune",
     "DuckDB",
     "macOS arm64",
     "--agent self",
@@ -165,6 +165,11 @@ def check_troubleshooting(readme: str) -> list[str]:
 
 def check_documents(documents: Documents) -> list[str]:
     failures: list[str] = []
+    for diagram, block in enumerate(re.findall(r"```mermaid\s*\n(.*?)```", documents.readme, re.DOTALL), start=1):
+        for label in re.findall(r"(?:-->|-.->|==>)\|([^|\n]*)\|", block):
+            label = label.strip()
+            if re.search(r"[{\[]", label) and not (label.startswith('"') and label.endswith('"')):
+                failures.append(f"README.md: mermaid diagram {diagram}: unquoted brace/bracket in edge label")
     for snippet in README_REQUIRED:
         if snippet not in documents.readme:
             failures.append(f"README.md: missing required text/command: {snippet}")

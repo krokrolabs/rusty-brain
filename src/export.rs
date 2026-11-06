@@ -45,7 +45,7 @@ pub fn export_with_dim(
     dim: usize,
     fault: Option<ExportFault>,
 ) -> Result<(PathBuf, usize)> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::config::ensure_private_dir(dir)?;
     ensure!(
         rows.iter().all(|(_, vector)| vector.len() == dim),
         "every exported embedding must contain exactly {dim} float32 values"
@@ -100,9 +100,14 @@ pub fn export_with_dim(
         uuid::Uuid::new_v4(),
         uuid::Uuid::new_v4()
     ));
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
         .open(&temp_path)
         .with_context(|| format!("creating temporary export {}", temp_path.display()))?;
 

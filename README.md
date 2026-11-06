@@ -5,11 +5,11 @@ embeddings computed **on your machine**. No accounts, no API keys, no telemetry.
 
 ```mermaid
 flowchart LR
-    A["AI agent<br/>(Claude Code, dsh, …)"] <-->|"MCP over stdio"| B[rusty-brain]
+    A["AI agent<br/>(Claude Code, dsh, …)"] <-->|"MCP over stdio"| B["rusty-brain"]
     You["You (CLI)"] --> B
     B --> C[("brain.db<br/>one per project")]
     B --> D["Parquet snapshots<br/>(derived, optional)"]
-    B -.->|local ONNX model| E["fastembed<br/>no network at embed time"]
+    B -.->|"local ONNX model"| E["fastembed<br/>no network at embed time"]
 ```
 
 ## What it does
@@ -23,7 +23,8 @@ flowchart LR
 | `recent`, `stats` | Latest memories; counts per agent, model, file size |
 | `path` / `data_path` | Show exactly where your data lives |
 | `export` | Write a new Parquet snapshot (derived; the brain file stays the truth) |
-| `reembed <model>` | Migrate the whole brain to another embedding model |
+| `reembed <model>` | Regenerate every vector with another embedding model |
+| `use-model <id>` | Select existing vectors without re-embedding (requires full active coverage) |
 | `models` | List supported embedding models |
 | `serve` | MCP server on stdio — how agents mount it |
 
@@ -44,6 +45,9 @@ flowchart TB
 - **One embedding model per brain** (`BGESmallENV15Q`, 384-dim, local ONNX).
   Mixing embedding spaces is refused. Switch models with `reembed`.
 - Delete a project = `rm -rf` its directory. There is nothing else, anywhere else.
+- On Unix, data/project/export directories are `0700`; `brain.db` and Parquet
+  exports are `0600`. Agent/project fields are conveniences inside this trusted
+  single-user boundary, not authorization or tenant isolation.
 
 ## Remember → recall
 
@@ -86,13 +90,13 @@ rusty-brain models               # supported embedding models
 ```mermaid
 flowchart LR
     subgraph harness["Your agent harness"]
-        C[Claude Code] 
-        D[dsh]
-        O[Other MCP client]
+        C["Claude Code"]
+        D["dsh"]
+        O["Other MCP client"]
     end
-    C -->|"claude mcp add rusty-brain -- rusty-brain serve"| S[rusty-brain serve]
+    C -->|"claude mcp add rusty-brain -- rusty-brain serve"| S["rusty-brain serve"]
     D -->|"cordis.yml patch<br/>dsh-mcp-client, stdio"| S
-    O -->|'{ "command": "rusty-brain", "args": ["serve"] }'| S
+    O -->|"stdio MCP config"| S
     S --> B[("brain.db<br/>scoped to the project dir")]
 ```
 
@@ -103,35 +107,49 @@ cd <your project>
 claude mcp add rusty-brain -e RUSTY_BRAIN_AGENT=claude-code -- rusty-brain serve
 ```
 
-**deepseek-harness (dsh)**: add the shipped overlay
-`examples/deepseek-harness/rusty-brain.cordis.yml` to your profile:
+**deepseek-harness (dsh)**: set `RB` to the **absolute** rusty-brain checkout,
+then change to the target project before launching with the shipped overlays:
 
 ```bash
+RB=/absolute/path/to/rusty-brain
+cd /absolute/path/to/your-target-project
 dsh --profile headless \
-  --patch examples/deepseek-harness/ollama-local.cordis.yml \
-  --patch examples/deepseek-harness/rusty-brain.cordis.yml
+  --patch "$RB/examples/deepseek-harness/ollama-local.cordis.yml" \
+  --patch "$RB/examples/deepseek-harness/rusty-brain.cordis.yml"
 ```
 
+The overlay records `agent=dsh`, `session=dsh-headless`, and scopes the brain to
+the target project's cwd (or `RUSTY_BRAIN_PROJECT` when explicitly set).
+
 **Any MCP client**: `{ "command": "rusty-brain", "args": ["serve"] }` with
-`RUSTY_BRAIN_AGENT` / `RUSTY_BRAIN_SESSION` set in the mount's env.
+`RUSTY_BRAIN_AGENT` / `RUSTY_BRAIN_SESSION` set in the mount's env. Set the
+client's cwd to the target project, or use explicit args
+`["--project", "<project-slug>", "serve"]` when the client cwd differs.
 
 ### 4. Snapshots and model migration
 
 ```bash
 rusty-brain export                          # new Parquet file, DuckDB-readable
-rusty-brain reembed SnowflakeArcticEmbedMQ  # re-embed with a better/larger model
+rusty-brain reembed SnowflakeArcticEmbedMQ  # regenerate with a better/larger model
+rusty-brain use-model BGESmallENV15Q        # select retained vectors; no inference
 ```
 
 ```mermaid
 flowchart LR
-    A[brain.db<br/>old model] --> R[reembed]
-    R --> N[brain.db<br/>new model, same ids/tags/provenance]
-    R --> K[brain.bak-&lt;oldmodel&gt;.db<br/>backup kept]
-    N --> E[exports/*.parquet<br/>DuckDB, pandas, Spark]
+    A["brain.db<br/>old model"] --> R["reembed"]
+    R --> N["brain.db<br/>new model, same ids/tags/provenance"]
+    R --> K["memory_embeddings<br/>old vectors kept (--prune to remove)"]
+    N --> E["exports/*.parquet<br/>current model only — DuckDB, pandas, Spark"]
 ```
 
-Re-embedding **regenerates every vector** (old vectors are never reused) and
-keeps ids, tags, timestamps, agent and session. The old brain is kept as a backup.
+Re-embedding **always regenerates every vector** (old vectors are never reused)
+and keeps ids, tags, timestamps, agent and session. By default, old models'
+vectors stay in `memory_embeddings`. Once every active memory has a valid vector
+for another model, `use-model <id>` switches to it with a metadata pointer flip
+and no model loading or inference; it refuses incomplete coverage. To remove old
+vectors: `reembed <model> --prune` (previous model only) or `--prune-all` (every
+older model); the two flags conflict. Exports include **only the current model's
+embedding** per memory.
 
 ## Troubleshooting
 
@@ -145,7 +163,7 @@ keeps ids, tags, timestamps, agent and session. The old brain is kept as a backu
 
 - **Observable symptom:** `dsh --version`, `ollama --version`, or `ollama show qwen3.8:27b-mlx` fails, the model lacks `tools`, or `verify-dsh.sh` exits before `H3 PASS`.
 - **Likely cause:** dsh/Ollama is not installed or on `PATH`, Ollama is not running, or the pinned local model is absent or not tool-capable.
-- **Corrective action:** Install/select dsh 0.1.1-rc.2 and Ollama 0.40.14, start Ollama, make `qwen3.8:27b-mlx` locally available, verify `ollama show` reports tools, and rerun the live script without enabling hosted fallback.
+- **Corrective action:** Install/select dsh 0.1.1-rc.2 and Ollama 0.40.15, start Ollama, make `qwen3.8:27b-mlx` locally available, verify `ollama show` reports tools, and rerun the live script without enabling hosted fallback.
 
 ### 3. Missing rusty-brain executable
 
@@ -174,7 +192,7 @@ keeps ids, tags, timestamps, agent and session. The old brain is kept as a backu
 ## Verification
 
 ```bash
-cargo test --offline                                  # 28 tests, no model download
+cargo test --offline                                  # 44 tests, no model download
 VERIFY_ROOT=$(mktemp -d /tmp/rusty-brain-verify.XXXXXX) scripts/verify-local.sh
 VERIFY_ROOT=<same root> scripts/verify-dsh.sh         # real dsh + Ollama run
 ```
@@ -186,4 +204,5 @@ evidence: [docs/verification.md](docs/verification.md).
 
 Docs: [Parquet schema](docs/parquet-schema.md) ·
 [MCP compatibility](docs/mcp-compatibility.md) ·
-[stack & learnings](https://github.com/cryolake/leki-context-hub/tree/main/specs/006-rusty-brain-local-verify)
+[models & licenses](docs/models.md) ·
+  [stack & learnings](https://github.com/cryolake/leki-context-hub/tree/main/specs/006-rusty-brain-local-verify)

@@ -1,18 +1,47 @@
 //! The brain file: one libsql (SQLite) database per project. This is the only
 //! source of truth; Parquet exports are derived artifacts and can be rebuilt.
+//!
+//! Schema 3: memories hold content and provenance; embeddings live in their own
+//! table keyed by (memory_id, model). Switching models adds vectors and flips
+//! `meta.current_model` — it never rewrites memories and never deletes the old
+//! vectors, so a model switch (or switch-back) loses nothing.
 
 use anyhow::{Context, Result, bail, ensure};
-use libsql::{Connection, Database, params};
+use libsql::{Connection, Database, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::config::{MODEL_ID, default_model, model_by_id};
+use crate::app::Prune;
+use crate::config::{MODEL_ID, ModelSpec, default_model, model_by_id};
 use crate::embed::to_vector_literal;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_CONTENT_BYTES: usize = 100_000;
+const MAX_QUERY_BYTES: usize = 4_096;
+const MAX_TAGS_BYTES: usize = 1_024;
+const MAX_PROVENANCE_BYTES: usize = 128;
 const MAX_LIMIT: usize = 50;
+
+/// A writer observed a model switch after preparing its embedding. The Brain
+/// retries with the newly selected model; direct Store callers get an error.
+#[derive(Debug)]
+pub struct ModelChanged {
+    pub expected: String,
+    pub actual: String,
+}
+
+impl std::fmt::Display for ModelChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "model changed from {} to {}; retry with the new model",
+            self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for ModelChanged {}
 
 #[derive(Clone)]
 pub struct Store {
@@ -51,6 +80,8 @@ pub struct Stats {
     pub db_path: String,
     pub db_bytes: u64,
     pub by_agent: Vec<(String, i64)>,
+    /// Every model that currently has vectors in this brain.
+    pub models: Vec<String>,
 }
 
 /// Recall scoping: every memory, only the calling agent's, everyone else's,
@@ -89,6 +120,26 @@ pub fn validate_content(content: &str) -> Result<()> {
 
 pub fn validate_query(query: &str) -> Result<()> {
     ensure!(!query.trim().is_empty(), "recall query must not be empty");
+    ensure!(
+        query.len() <= MAX_QUERY_BYTES,
+        "recall query exceeds {MAX_QUERY_BYTES} bytes"
+    );
+    Ok(())
+}
+
+pub fn validate_tags(tags: &str) -> Result<()> {
+    ensure!(
+        tags.len() <= MAX_TAGS_BYTES,
+        "memory tags exceed {MAX_TAGS_BYTES} bytes"
+    );
+    Ok(())
+}
+
+pub fn validate_provenance(field: &str, value: &str) -> Result<()> {
+    ensure!(
+        value.len() <= MAX_PROVENANCE_BYTES,
+        "{field} exceeds {MAX_PROVENANCE_BYTES} bytes"
+    );
     Ok(())
 }
 
@@ -105,24 +156,10 @@ pub fn validate_memory_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-fn memory_from_row(row: &libsql::Row) -> Result<Memory> {
-    Ok(Memory {
-        id: row.get(0)?,
-        content: row.get(1)?,
-        tags: row.get(2)?,
-        embedding_model: row.get(3)?,
-        created_at: row.get(4)?,
-        agent: row.get(5)?,
-        session: row.get(6)?,
-    })
-}
-
-const MEMORY_COLS: &str = "id, content, tags, embedding_model, created_at, agent, session";
-
 impl Store {
-    /// The model recorded in an existing brain, if the file exists. Returns
-    /// None when there is no brain yet; errors on a brain with no metadata or
-    /// an unregistered model (refusing to mix embedding spaces).
+    /// The model recorded in an existing brain, if the file exists. An empty
+    /// interrupted initialization is resumable; memories without model metadata
+    /// are still refused because guessing their embedding space is unsafe.
     pub async fn model_of(path: &Path) -> Result<Option<String>> {
         if !path
             .try_exists()
@@ -135,15 +172,20 @@ impl Store {
             .await
             .with_context(|| format!("opening existing brain at {}", path.display()))?;
         let conn = db.connect().context("connecting to existing brain")?;
-        let mut rows = conn
-            .query("SELECT value FROM meta WHERE key = 'embedding_model'", ())
-            .await
-            .context("reading embedding model metadata")?;
-        let recorded = rows
-            .next()
+        let recorded = Self::read_meta(&conn, "current_model")
             .await?
-            .context("existing brain has no embedding model metadata; refusing to modify it")?
-            .get::<String>(0)?;
+            .or(Self::read_meta(&conn, "embedding_model").await?);
+        let Some(recorded) = recorded else {
+            if Self::table_exists(&conn, "memories").await? {
+                let mut rows = conn.query("SELECT count(*) FROM memories", ()).await?;
+                let memories: i64 = rows.next().await?.context("memory count")?.get(0)?;
+                ensure!(
+                    memories == 0,
+                    "existing brain has no embedding model metadata; refusing to modify it"
+                );
+            }
+            return Ok(None);
+        };
         if model_by_id(&recorded).is_none() {
             bail!(
                 "this brain was created with unknown model {recorded}; \
@@ -156,6 +198,29 @@ impl Store {
             );
         }
         Ok(Some(recorded))
+    }
+
+    async fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![name],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    async fn read_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
+        if !Self::table_exists(conn, "meta").await? {
+            return Ok(None);
+        }
+        let mut rows = conn
+            .query("SELECT value FROM meta WHERE key = ?1", params![key])
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
     }
 
     pub async fn open(path: &Path) -> Result<Self> {
@@ -179,63 +244,112 @@ impl Store {
             .await
             .with_context(|| format!("opening brain at {}", path.display()))?;
         let conn = db.connect().context("connecting to brain")?;
-        conn.execute_batch(&format!(
+        conn.busy_timeout(std::time::Duration::from_secs(30))
+            .context("configuring SQLite writer wait")?;
+        conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS memories (
                 id TEXT PRIMARY KEY,
                 content TEXT NOT NULL,
                 tags TEXT NOT NULL DEFAULT '',
-                embedding F32_BLOB({dim}) NOT NULL,
-                embedding_model TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 deleted_at TEXT,
                 agent TEXT NOT NULL DEFAULT '',
                 session TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS memory_embeddings (
+                memory_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                embedding BLOB NOT NULL,
+                PRIMARY KEY (memory_id, model)
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(id UNINDEXED, content);
-            "#
-        ))
+            "#,
+        )
         .await
         .context("creating schema")?;
 
-        // Additive migration from schema 1 (no provenance column).
+        // Additive migration: schema 1 (no provenance) and schema 2 (vectors in
+        // the memories table) both upgrade in place.
         let mut cols = conn.query("PRAGMA table_info(memories)", ()).await?;
         let mut has_agent = false;
+        let mut has_session = false;
+        let mut has_embedding = false;
         while let Some(row) = cols.next().await? {
             let name: String = row.get(1)?;
             if name == "agent" {
                 has_agent = true;
             }
+            if name == "session" {
+                has_session = true;
+            }
+            if name == "embedding" {
+                has_embedding = true;
+            }
         }
+        drop(cols);
+        // Each column is an independently resumable migration step: a crash
+        // between them must not make the next open skip the missing column.
         if !has_agent {
-            conn.execute_batch(
-                "ALTER TABLE memories ADD COLUMN agent TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE memories ADD COLUMN session TEXT NOT NULL DEFAULT '';",
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN agent TEXT NOT NULL DEFAULT ''",
+                (),
             )
             .await
-            .context("migrating schema 1 -> 2 (agent/session provenance)")?;
+            .context("migrating agent column")?;
+        }
+        if !has_session {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN session TEXT NOT NULL DEFAULT ''",
+                (),
+            )
+            .await
+            .context("migrating session column")?;
+        }
+        if has_embedding {
+            // Schema 2 -> 3: move vectors into their own table, then drop the
+            // old columns so there is exactly one home for embeddings.
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_embeddings (memory_id, model, dim, embedding)
+                 SELECT id, embedding_model, length(embedding) / 4, embedding FROM memories",
+                (),
+            )
+            .await
+            .context("moving embeddings to memory_embeddings")?;
+            if Self::read_meta(&conn, "current_model").await?.is_none() {
+                let legacy = Self::read_meta(&conn, "embedding_model")
+                    .await?
+                    .unwrap_or_else(|| MODEL_ID.to_string());
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('current_model', ?1)",
+                    params![legacy],
+                )
+                .await?;
+            }
+            if let Err(error) = conn
+                .execute_batch(
+                    "ALTER TABLE memories DROP COLUMN embedding;
+                     ALTER TABLE memories DROP COLUMN embedding_model;",
+                )
+                .await
+            {
+                // Older engines cannot drop columns: leave them, unused.
+                eprintln!("note: legacy embedding columns left in place: {error}");
+            }
         }
 
-        let mut rows = conn
-            .query("SELECT value FROM meta WHERE key = 'embedding_model'", ())
-            .await?;
-        if rows.next().await?.is_none() {
+        if Self::read_meta(&conn, "current_model").await?.is_none() {
             conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('embedding_model', ?1)",
+                "INSERT INTO meta (key, value) VALUES ('current_model', ?1)",
                 params![spec.id],
             )
             .await?;
         }
         // Write only on an actual version change: a read-only open must not
         // mutate the brain file (hash-stable reopening is part of the contract).
-        let mut version_rows = conn
-            .query("SELECT value FROM meta WHERE key = 'schema_version'", ())
-            .await?;
-        let current_version = match version_rows.next().await? {
-            Some(row) => Some(row.get::<String>(0)?),
-            None => None,
-        };
+        let current_version = Self::read_meta(&conn, "schema_version").await?;
         if current_version.as_deref() != Some(SCHEMA_VERSION.to_string().as_str()) {
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
@@ -243,6 +357,7 @@ impl Store {
             )
             .await?;
         }
+        crate::config::set_private_file(path)?;
         Ok(Self {
             conn,
             model_id: spec.id.to_string(),
@@ -259,6 +374,9 @@ impl Store {
         embedding: &[f32],
     ) -> Result<String> {
         validate_content(content)?;
+        validate_tags(tags)?;
+        validate_provenance("agent", agent)?;
+        validate_provenance("session", session)?;
         ensure!(
             embedding.len() == self.dim as usize && embedding.iter().all(|v| v.is_finite()),
             "embedding must contain exactly {} finite float32 values",
@@ -270,18 +388,25 @@ impl Store {
         let vector = to_vector_literal(embedding);
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .context("starting remember transaction")?;
+        let actual = Self::read_meta(&tx, "current_model")
+            .await?
+            .unwrap_or_else(|| self.model_id.clone());
+        if actual != self.model_id {
+            return Err(anyhow::Error::new(ModelChanged {
+                expected: self.model_id.clone(),
+                actual,
+            }));
+        }
         tx.execute(
-            "INSERT INTO memories (id, content, tags, embedding, embedding_model, created_at, agent, session)
-             VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7, ?8)",
+            "INSERT INTO memories (id, content, tags, created_at, agent, session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 id.as_str(),
                 content,
                 tags,
-                vector.as_str(),
-                self.model_id.as_str(),
                 created_at.as_str(),
                 agent,
                 session
@@ -289,6 +414,18 @@ impl Store {
         )
         .await
         .context("inserting memory")?;
+        tx.execute(
+            "INSERT INTO memory_embeddings (memory_id, model, dim, embedding)
+             VALUES (?1, ?2, ?3, vector32(?4))",
+            params![
+                id.as_str(),
+                self.model_id.as_str(),
+                self.dim,
+                vector.as_str()
+            ],
+        )
+        .await
+        .context("inserting embedding")?;
         tx.execute(
             "INSERT INTO memories_fts (id, content) VALUES (?1, ?2)",
             params![id.as_str(), content],
@@ -301,8 +438,8 @@ impl Store {
         Ok(id)
     }
 
-    /// Hybrid recall: cosine top-k plus FTS5 matches, merged with reciprocal
-    /// rank fusion (k = 60), scoped by the agent filter.
+    /// Hybrid recall over the CURRENT model's vectors: cosine top-k plus FTS5
+    /// matches, merged with reciprocal rank fusion (k = 60), scoped by agent.
     pub async fn recall(
         &self,
         query: &str,
@@ -319,21 +456,22 @@ impl Store {
         let vector = to_vector_literal(embedding);
         let (clause, agent_arg) = match filter {
             AgentFilter::All => ("", None),
-            AgentFilter::Own(a) => ("AND agent = ?3", Some(a.clone())),
-            AgentFilter::Named(a) => ("AND agent = ?3", Some(a.clone())),
-            AgentFilter::Others(a) => ("AND agent <> ?3", Some(a.clone())),
+            AgentFilter::Own(a) | AgentFilter::Named(a) => ("AND m.agent = ?4", Some(a.clone())),
+            AgentFilter::Others(a) => ("AND m.agent <> ?4", Some(a.clone())),
         };
-
+        let semantic_sql = format!(
+            "SELECT m.id, vector_distance_cos(e.embedding, vector32(?1)) AS d
+             FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id AND e.model = ?2
+             WHERE m.deleted_at IS NULL {clause} ORDER BY d ASC, m.id ASC LIMIT ?3"
+        );
         let mut sem = self
             .conn
             .query(
-                &format!(
-                    "SELECT id, vector_distance_cos(embedding, vector32(?1)) AS d
-                     FROM memories WHERE deleted_at IS NULL {clause} ORDER BY d ASC LIMIT ?2"
-                ),
+                &semantic_sql,
                 libsql::params_from_iter(
                     [
                         libsql::Value::from(vector.as_str()),
+                        libsql::Value::from(self.model_id.as_str()),
                         libsql::Value::from(candidates),
                     ]
                     .into_iter()
@@ -355,7 +493,7 @@ impl Store {
                     &format!(
                         "SELECT f.id FROM memories_fts f JOIN memories m ON m.id = f.id
                          WHERE memories_fts MATCH ?1 AND m.deleted_at IS NULL {clause}
-                         ORDER BY rank LIMIT ?2"
+                         ORDER BY rank, f.id ASC LIMIT ?2"
                     ),
                     libsql::params_from_iter(
                         [
@@ -411,16 +549,29 @@ impl Store {
         Ok(hits)
     }
 
+    fn memory_from_row(&self, row: &libsql::Row) -> Result<Memory> {
+        Ok(Memory {
+            id: row.get(0)?,
+            content: row.get(1)?,
+            tags: row.get(2)?,
+            embedding_model: self.model_id.clone(),
+            created_at: row.get(3)?,
+            agent: row.get(4)?,
+            session: row.get(5)?,
+        })
+    }
+
     pub async fn get(&self, id: &str) -> Result<Option<Memory>> {
         let mut rows = self
             .conn
             .query(
-                &format!("SELECT {MEMORY_COLS} FROM memories WHERE id = ?1 AND deleted_at IS NULL"),
+                "SELECT id, content, tags, created_at, agent, session
+                 FROM memories WHERE id = ?1 AND deleted_at IS NULL",
                 params![id],
             )
             .await?;
         match rows.next().await? {
-            Some(row) => Ok(Some(memory_from_row(&row)?)),
+            Some(row) => Ok(Some(self.memory_from_row(&row)?)),
             None => Ok(None),
         }
     }
@@ -430,7 +581,7 @@ impl Store {
         let now = chrono::Utc::now().to_rfc3339();
         let tx = self
             .conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .await
             .context("starting forget transaction")?;
         let changed = tx
@@ -457,35 +608,34 @@ impl Store {
         let mut rows = self
             .conn
             .query(
-                &format!(
-                    "SELECT {MEMORY_COLS} FROM memories
-                     WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?1"
-                ),
+                "SELECT id, content, tags, created_at, agent, session FROM memories
+                 WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ?1",
                 params![limit as i64],
             )
             .await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
-            out.push(memory_from_row(&row)?);
+            out.push(self.memory_from_row(&row)?);
         }
         Ok(out)
     }
 
+    /// Export joins each active memory with its CURRENT model's vector only.
     pub async fn all_for_export(&self) -> Result<Vec<(Memory, Vec<f32>)>> {
         let mut rows = self
             .conn
             .query(
-                &format!(
-                    "SELECT {MEMORY_COLS}, embedding FROM memories
-                     WHERE deleted_at IS NULL ORDER BY created_at ASC"
-                ),
-                (),
+                "SELECT m.id, m.content, m.tags, m.created_at, m.agent, m.session, e.embedding
+                 FROM memories m JOIN memory_embeddings e
+                   ON e.memory_id = m.id AND e.model = ?1
+                 WHERE m.deleted_at IS NULL ORDER BY m.created_at ASC",
+                params![self.model_id.as_str()],
             )
             .await?;
         let mut out = Vec::new();
         while let Some(row) = rows.next().await? {
-            let memory = memory_from_row(&row)?;
-            let blob: Vec<u8> = row.get(7)?;
+            let memory = self.memory_from_row(&row)?;
+            let blob: Vec<u8> = row.get(6)?;
             let floats = blob
                 .chunks_exact(4)
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -493,11 +643,6 @@ impl Store {
             out.push((memory, floats));
         }
         Ok(out)
-    }
-
-    /// The embedding width this brain was created with.
-    pub fn dim(&self) -> i64 {
-        self.dim
     }
 
     pub async fn stats(&self, db_path: &Path) -> Result<Stats> {
@@ -518,6 +663,17 @@ impl Store {
         while let Some(row) = by_agent_rows.next().await? {
             by_agent.push((row.get(0)?, row.get(1)?));
         }
+        let mut model_rows = self
+            .conn
+            .query(
+                "SELECT DISTINCT model FROM memory_embeddings ORDER BY model",
+                (),
+            )
+            .await?;
+        let mut models = Vec::new();
+        while let Some(row) = model_rows.next().await? {
+            models.push(row.get(0)?);
+        }
         let db_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
         Ok(Stats {
             memories,
@@ -526,17 +682,41 @@ impl Store {
             db_path: db_path.display().to_string(),
             db_bytes,
             by_agent,
+            models,
         })
     }
 
-    /// Every row, including soft-deleted ones, without vectors: the input of a
-    /// re-embedding migration. Ids, timestamps and provenance are preserved.
-    pub async fn raw_rows(&self) -> Result<Vec<RawRow>> {
-        let mut rows = self
-            .conn
+    /// The embedding width this brain currently uses.
+    pub fn dim(&self) -> i64 {
+        self.dim
+    }
+
+    /// The model id captured when this Store was opened.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Acquire the SQLite write lock before taking the migration snapshot and
+    /// hold it through vector generation, validation, pruning and pointer flip.
+    pub async fn begin_reembed(&self) -> Result<Transaction> {
+        self.conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .context("starting serialized re-embed transaction")
+    }
+
+    pub async fn reembed_current_model(tx: &Transaction) -> Result<String> {
+        Self::read_meta(tx, "current_model")
+            .await?
+            .context("re-embed requires current model metadata")
+    }
+
+    /// Every row, including soft-deleted ones, from the locked migration snapshot.
+    pub async fn reembed_rows(tx: &Transaction) -> Result<Vec<RawRow>> {
+        let mut rows = tx
             .query(
                 "SELECT id, content, tags, created_at, deleted_at, agent, session FROM memories
-                 ORDER BY created_at ASC",
+                 ORDER BY created_at ASC, id ASC",
                 (),
             )
             .await?;
@@ -555,36 +735,211 @@ impl Store {
         Ok(out)
     }
 
-    /// Insert a preserved row into a brain being re-embedded (no new id, no new
-    /// timestamps). FTS is rebuilt only for rows that are still active.
-    pub async fn insert_preserved(&self, row: &RawRow, embedding: &[f32]) -> Result<()> {
-        let vector = to_vector_literal(embedding);
-        let tx = self.conn.transaction().await?;
-        tx.execute(
-            "INSERT INTO memories (id, content, tags, embedding, embedding_model, created_at, deleted_at, agent, session)
-             VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7, ?8, ?9)",
-            params![
-                row.id.as_str(),
-                row.content.as_str(),
-                row.tags.as_str(),
-                vector.as_str(),
-                self.model_id.as_str(),
-                row.created_at.as_str(),
-                row.deleted_at.as_deref(),
-                row.agent.as_str(),
-                row.session.as_str()
-            ],
-        )
-        .await?;
-        if row.deleted_at.is_none() {
+    fn validate_target_embeddings(
+        rows: &[RawRow],
+        spec: &ModelSpec,
+        embeddings: &[Vec<f32>],
+    ) -> Result<()> {
+        ensure!(
+            rows.len() == embeddings.len(),
+            "re-embed count mismatch: {} rows in, {} vectors out",
+            rows.len(),
+            embeddings.len()
+        );
+        for (row, embedding) in rows.iter().zip(embeddings) {
+            ensure!(
+                embedding.len() == spec.dim as usize && embedding.iter().all(|v| v.is_finite()),
+                "re-embed vector for {} must contain exactly {} finite float32 values",
+                row.id,
+                spec.dim
+            );
+        }
+        Ok(())
+    }
+
+    /// Commit the complete migration as one immediate transaction. All vectors
+    /// are checked before the first insert and read back before pruning/pointer flip.
+    pub async fn commit_reembed(
+        tx: Transaction,
+        from_model: &str,
+        spec: &ModelSpec,
+        prune: Prune,
+        rows: &[RawRow],
+        embeddings: &[Vec<f32>],
+    ) -> Result<()> {
+        Self::validate_target_embeddings(rows, spec, embeddings)?;
+        for (row, embedding) in rows.iter().zip(embeddings) {
+            let vector = to_vector_literal(embedding);
             tx.execute(
-                "INSERT INTO memories_fts (id, content) VALUES (?1, ?2)",
-                params![row.id.as_str(), row.content.as_str()],
+                "INSERT OR REPLACE INTO memory_embeddings (memory_id, model, dim, embedding)
+                 VALUES (?1, ?2, ?3, vector32(?4))",
+                params![row.id.as_str(), spec.id, spec.dim, vector.as_str()],
+            )
+            .await
+            .context("inserting re-embed target vector")?;
+        }
+
+        let mut stored = tx
+            .query(
+                "SELECT memory_id, dim, embedding FROM memory_embeddings WHERE model = ?1",
+                params![spec.id],
             )
             .await?;
+        let expected: std::collections::HashSet<String> =
+            rows.iter().map(|row| row.id.clone()).collect();
+        let mut actual = std::collections::HashSet::new();
+        while let Some(row) = stored.next().await? {
+            let id: String = row.get(0)?;
+            let dim: i64 = row.get(1)?;
+            let blob: Vec<u8> = row.get(2)?;
+            ensure!(
+                dim == spec.dim && blob.len() == spec.dim as usize * 4,
+                "stored re-embed vector for {id} must contain exactly {} float32 values",
+                spec.dim
+            );
+            ensure!(
+                blob.chunks_exact(4).all(|bytes| f32::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3]
+                ])
+                .is_finite()),
+                "stored re-embed vector for {id} must contain only finite float32 values"
+            );
+            actual.insert(id);
         }
-        tx.commit().await?;
+        drop(stored);
+        ensure!(
+            actual == expected,
+            "re-embed count/identity mismatch: {} rows in, {} valid target vectors out",
+            expected.len(),
+            actual.len()
+        );
+
+        match prune {
+            Prune::Keep => {}
+            Prune::Old => {
+                tx.execute(
+                    "DELETE FROM memory_embeddings WHERE model = ?1",
+                    params![from_model],
+                )
+                .await
+                .context("pruning previous model vectors")?;
+            }
+            Prune::All => {
+                tx.execute(
+                    "DELETE FROM memory_embeddings WHERE model <> ?1",
+                    params![spec.id],
+                )
+                .await
+                .context("pruning all older model vectors")?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('current_model', ?1)",
+            params![spec.id],
+        )
+        .await
+        .context("flipping current model pointer")?;
+        tx.commit()
+            .await
+            .context("committing re-embed transaction")?;
         Ok(())
+    }
+
+    /// Switch to an already-populated model without regenerating any vectors.
+    pub async fn use_model(&self, new_model_id: &str) -> Result<String> {
+        let spec =
+            model_by_id(new_model_id).with_context(|| format!("unknown model {new_model_id}"))?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .context("starting use-model transaction")?;
+        let from = Self::reembed_current_model(&tx).await?;
+        if from == new_model_id {
+            tx.rollback().await?;
+            return Ok(from);
+        }
+        let mut rows = tx
+            .query(
+                "SELECT m.id, e.dim, e.embedding FROM memories m
+                 JOIN memory_embeddings e ON e.memory_id = m.id AND e.model = ?1
+                 WHERE m.deleted_at IS NULL",
+                params![new_model_id],
+            )
+            .await?;
+        let mut covered = std::collections::HashSet::new();
+        while let Some(row) = rows.next().await? {
+            let id: String = row.get(0)?;
+            let dim: i64 = row.get(1)?;
+            let blob: Vec<u8> = row.get(2)?;
+            ensure!(
+                dim == spec.dim
+                    && blob.len() == spec.dim as usize * 4
+                    && blob.chunks_exact(4).all(|bytes| f32::from_le_bytes([
+                        bytes[0], bytes[1], bytes[2], bytes[3]
+                    ])
+                    .is_finite()),
+                "active memory {id} has an invalid vector for model {new_model_id}"
+            );
+            covered.insert(id);
+        }
+        drop(rows);
+        let mut active = tx
+            .query("SELECT id FROM memories WHERE deleted_at IS NULL", ())
+            .await?;
+        let mut expected = std::collections::HashSet::new();
+        while let Some(row) = active.next().await? {
+            expected.insert(row.get::<String>(0)?);
+        }
+        drop(active);
+        ensure!(
+            covered == expected,
+            "cannot use model {new_model_id}: every active memory must already have a valid vector for it; run reembed {new_model_id}"
+        );
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('current_model', ?1)",
+            params![new_model_id],
+        )
+        .await?;
+        tx.commit()
+            .await
+            .context("committing use-model transaction")?;
+        Ok(from)
+    }
+
+    /// Insert or replace one vector, primarily for compatibility/test tooling.
+    pub async fn insert_embedding(
+        &self,
+        memory_id: &str,
+        model: &str,
+        dim: i64,
+        embedding: &[f32],
+    ) -> Result<()> {
+        ensure!(
+            embedding.len() == dim as usize && embedding.iter().all(|v| v.is_finite()),
+            "embedding must contain exactly {dim} finite float32 values"
+        );
+        let vector = to_vector_literal(embedding);
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO memory_embeddings (memory_id, model, dim, embedding)
+                 VALUES (?1, ?2, ?3, vector32(?4))",
+                params![memory_id, model, dim, vector.as_str()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Count of rows that have vectors for one model (migration validation).
+    pub async fn count_embeddings(&self, model: &str) -> Result<i64> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT count(*) FROM memory_embeddings WHERE model = ?1",
+                params![model],
+            )
+            .await?;
+        Ok(rows.next().await?.context("count row")?.get(0)?)
     }
 }
 

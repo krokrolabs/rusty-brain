@@ -25,6 +25,7 @@ ARGS_EXPRESSION = (
     "  : ['serve']"
 )
 CWD_EXPRESSION = "process.cwd()"
+MEMORY_ENV = {"RUSTY_BRAIN_AGENT": "dsh", "RUSTY_BRAIN_SESSION": "dsh-headless"}
 
 
 class Loader(yaml.SafeLoader):
@@ -106,6 +107,7 @@ def validate(document: Any, root: Path, project_cwd: Path, env: dict[str, str]) 
     require(config.get("serverName") == "rusty-brain", "serverName identity mismatch")
     require(config.get("transport") == "stdio", "memory transport must be stdio")
     require(config.get("command") == "rusty-brain", "memory command mismatch")
+    require(config.get("env") == MEMORY_ENV, "dsh agent/session environment mismatch")
     require(config.get("args") == ARGS_EXPRESSION, "project args !!js expression was evaluated or changed")
     require(config.get("cwd") == CWD_EXPRESSION, "cwd !!js expression was evaluated or changed")
 
@@ -128,6 +130,15 @@ def run_positive_controls(document: Any, root: Path, project_cwd: Path, env: dic
         pass
     else:
         raise AssertionError("null-valued positive control was accepted")
+
+    wrong_identity = copy.deepcopy(document)
+    by_id(wrong_identity, "memory-rusty-brain")["config"]["env"]["RUSTY_BRAIN_AGENT"] = "cli"
+    try:
+        validate(wrong_identity, root, project_cwd, env)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("agent-identity positive control was accepted")
 
     try:
         validate(document, root, Path("/tmp"), env)
@@ -166,7 +177,7 @@ def main() -> int:
         memory = inserted_memory(memory_overlay)
         require(memory == {
             "id": "memory-rusty-brain", "name": "@deepseek-ai/dsh-mcp-client",
-            "config": {"serverName": "rusty-brain", "transport": "stdio", "command": "rusty-brain", "args": ARGS_EXPRESSION, "cwd": CWD_EXPRESSION},
+            "config": {"serverName": "rusty-brain", "transport": "stdio", "command": "rusty-brain", "env": MEMORY_ENV, "args": ARGS_EXPRESSION, "cwd": CWD_EXPRESSION},
         }, "memory overlay differs from the interoperability contract")
         document = load(args.dump)
         env = dict(os.environ)

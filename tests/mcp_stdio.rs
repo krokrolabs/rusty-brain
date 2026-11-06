@@ -246,6 +246,17 @@ async fn real_stdio_catalog_results_errors_lifecycle_and_cap() {
             json!({"query": "unused", "limit": 51}),
             "between 0 and 50",
         ),
+        ("recall", json!({"query": "q".repeat(4_097)}), "4096"),
+        (
+            "remember",
+            json!({"content": "not stored", "tags": "t".repeat(1_025)}),
+            "1024",
+        ),
+        (
+            "recall",
+            json!({"query": "bounded", "agent": "a".repeat(129)}),
+            "128",
+        ),
         ("forget", json!({"id": "not-a-uuid"}), "canonical UUID"),
     ] {
         let result = call(&client, name, arguments).await.unwrap();
@@ -278,7 +289,15 @@ async fn real_stdio_catalog_results_errors_lifecycle_and_cap() {
             .display()
             .to_string()
     );
-    assert_eq!(structured(&path)["model"], "AllMiniLML6V2Q");
+    assert_eq!(structured(&path)["model"], "BGESmallENV15Q");
+    assert_eq!(
+        structured(&path)["models_dir"],
+        home.join("models").display().to_string()
+    );
+    assert_eq!(
+        structured(&path)["project_dir"],
+        home.join("projects").join(&project).display().to_string()
+    );
     assert_eq!(
         text(&path).parse::<Value>().unwrap(),
         structured(&path).clone()
@@ -286,8 +305,8 @@ async fn real_stdio_catalog_results_errors_lifecycle_and_cap() {
 
     let before = call(&client, "stats", json!({})).await.unwrap();
     let initial_count = structured(&before)["memories"].as_i64().unwrap();
-    assert_eq!(structured(&before)["model"], "AllMiniLML6V2Q");
-    assert_eq!(structured(&before)["schema_version"], 1);
+    assert_eq!(structured(&before)["model"], "BGESmallENV15Q");
+    assert_eq!(structured(&before)["schema_version"], 3);
 
     let token = format!("RB-MCP-{}", Uuid::new_v4());
     let remembered = call(

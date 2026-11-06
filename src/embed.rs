@@ -8,15 +8,19 @@ use std::path::Path;
 
 use crate::config::ModelSpec;
 
+enum EmbedderModel {
+    FastEmbed(Box<TextEmbedding>),
+    Synthetic,
+}
+
 pub struct Embedder {
-    model: TextEmbedding,
+    model: EmbedderModel,
     spec: &'static ModelSpec,
 }
 
 impl Embedder {
     pub fn new(models_dir: &Path, spec: &'static ModelSpec) -> Result<Self> {
-        std::fs::create_dir_all(models_dir)
-            .with_context(|| format!("creating model cache at {}", models_dir.display()))?;
+        crate::config::ensure_private_dir(models_dir)?;
         let model = TextEmbedding::try_new(
             TextInitOptions::new(spec.variant.clone())
                 .with_cache_dir(models_dir.to_path_buf())
@@ -28,16 +32,40 @@ impl Embedder {
                 spec.id
             )
         })?;
-        Ok(Self { model, spec })
+        Ok(Self {
+            model: EmbedderModel::FastEmbed(Box::new(model)),
+            spec,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn synthetic(spec: &'static ModelSpec) -> Self {
+        Self {
+            model: EmbedderModel::Synthetic,
+            spec,
+        }
     }
 
     /// Document embedding (memories). No retrieval instruction is ever added.
     pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let mut out = self
-            .model
-            .embed(vec![text], None)
-            .context("embedding text")?;
-        out.pop().context("empty embedding result")
+        match &mut self.model {
+            EmbedderModel::FastEmbed(model) => {
+                let mut out = model.embed(vec![text], None).context("embedding text")?;
+                out.pop().context("empty embedding result")
+            }
+            EmbedderModel::Synthetic => {
+                let mut vector = vec![0.0; self.spec.dim as usize];
+                let model_index = crate::config::MODELS
+                    .iter()
+                    .position(|candidate| candidate.id == self.spec.id)
+                    .context("synthetic model is not registered")?;
+                vector[model_index] = 1.0;
+                // Keep text relevant without conflating model identity and width.
+                let text_index = model_index + 1 + text.len() % (vector.len() - 2);
+                vector[text_index] = 0.25;
+                Ok(vector)
+            }
+        }
     }
 
     /// Query embedding: applies the model's retrieval instruction if it has one.

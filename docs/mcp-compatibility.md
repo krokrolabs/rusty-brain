@@ -18,8 +18,10 @@ run proves their resolved identity through `data_path`, session `meta.cwd`, and
 read-only inspection of the isolated database.
 
 The required scope list is empty because the operating-system user and explicit
-project/data roots are the complete trust boundary. No credential, OAuth scope,
-tenant, or hosted provider crosses the stdio boundary.
+project/data roots are the complete trust boundary. Agent and project identity
+are query/provenance conveniences, not isolation controls: every mounted harness
+is fully trusted and can read or forget another agent's memories. No credential,
+OAuth scope, tenant, or hosted provider crosses the stdio boundary.
 
 ## Contract and bounds
 
@@ -45,11 +47,11 @@ query.
 
 | Raw name | Shared operation | Effect and risk | Confirmation / idempotency | Tool-specific limits |
 |---|---|---|---|---|
-| `remember` | `Brain::remember` | Creates durable local content and its local embedding | Explicit content is the request; not idempotent, repeated calls create distinct UUIDs | Trimmed non-empty content, at most 100,000 UTF-8 bytes; optional comma-separated tags |
-| `recall` | `Brain::recall` | Reads local project content through hybrid semantic and exact-keyword search | No confirmation; idempotent | Trimmed non-empty query; escaped FTS operators; limit 0–50, default 5; never reports truncation |
+| `remember` | `Brain::remember` | Creates durable local content and its local embedding | Explicit content is the request; not idempotent, repeated calls create distinct UUIDs | Trimmed non-empty content at most 100,000 UTF-8 bytes; optional tags at most 1,024 bytes; agent/session at most 128 bytes each |
+| `recall` | `Brain::recall` | Reads local project content through hybrid semantic and exact-keyword search | No confirmation; idempotent | Trimmed non-empty query at most 4,096 UTF-8 bytes; agent at most 128 bytes; escaped FTS operators; limit 0–50, default 5; never reports truncation |
 | `forget` | `Brain::forget` | Recoverable local soft deletion | Explicit user-supplied UUID under CT-4C; idempotent, unknown/already-forgotten UUIDs are no-ops | Canonical hyphenated lowercase UUID |
-| `stats` | `Brain::stats` | Reads active count, pinned model, schema version, DB path and size | No confirmation; idempotent | Empty input; one fixed object |
-| `data_path` | `Config` home/project/`db_path` | Reads selected local paths and pinned model | No confirmation; idempotent | Empty input; one fixed object |
+| `stats` | `Brain::stats` | Reads active count, active model, schema version, DB path and size | No confirmation; idempotent | Empty input; one fixed object |
+| `data_path` | `Brain::current_model` + `Config` paths | Reads home, brain file, project slug/dir, model cache dir, and actual active model | No confirmation; idempotent | Empty input; one fixed object |
 
 All five have `openWorldHint: false`. `remember` has `(readOnlyHint=false,
 destructiveHint=false, idempotentHint=false)`; `forget` has `(false, true,
@@ -75,10 +77,11 @@ behavior. Those corrections land together with the existing five names and no
 alias/deprecation layer. Future breaking changes require a new tool name and a
 deprecation window.
 
-There are no cursors, filters, idempotency-key arguments, or separate
-confirmation handles under CT-4B/CT-4C/CT-4D. Repeated `remember` calls are
-intentional new facts; `forget` is idempotent by UUID. Recall is deterministic
-bounded top-k, while stats/data_path are singleton reads.
+There are no cursors, idempotency-key arguments, or separate confirmation
+handles under CT-4B/CT-4C/CT-4D. Recall's documented `agent` argument is the one
+supported filter. Repeated `remember` calls are intentional new facts; `forget`
+is idempotent by UUID. Recall is deterministic bounded top-k with stable id
+tie-breakers in both source rankings, while stats/data_path are singleton reads.
 
 ## Verification surface
 
@@ -101,7 +104,7 @@ stdout as protocol-only. `scripts/verify-dsh.sh` separately performs structural
 composition and the real local dsh/Ollama journey; a dump-only run is never a
 live pass.
 
-## Provenance and recall scoping (schema 2)
+## Provenance, recall scoping and model switching (schema 3)
 
 - Every memory carries `agent` (which harness/CLI wrote it) and `session` (when
   the harness provided one). Brains created before provenance are migrated
@@ -110,8 +113,17 @@ live pass.
   `others`, or an exact agent name. Both the semantic and the keyword legs are
   filtered, so `others` never leaks the caller's own rows.
 - `stats` adds `by_agent`: per-agent active-memory counts, sorted by agent.
-- A brain records one embedding model in its metadata and opens with it;
-  unknown model ids are refused. `reembed` is a CLI-only migration command that
-  regenerates every vector with the target model and keeps the old brain as a
-  backup. Exported snapshots include `agent` and `session` and use the brain's
-  actual embedding width (384 or 768).
+- Schema 3 keeps content in `memories` and vectors in
+  `memory_embeddings (memory_id, model, dim, embedding)`; the active model is the
+  `meta.current_model` pointer. Re-embedding regenerates every vector in one
+  immediate transaction (including validation, requested pruning, and pointer
+  flip), serialized against writers. Memories are never rewritten, and old
+  models' vectors stay unless pruned. Long-lived servers reread the pointer and
+  reload store/embedder state by model id after an external switch.
+  `reembed --prune` deletes the previous model's vectors; `--prune-all` deletes
+  every older model's, and the flags conflict. `use-model <id>` flips the pointer
+  without inference only when every active memory already has a valid target
+  vector. Unknown model ids are refused.
+- `stats` adds `models` (every model with vectors present). Exported snapshots
+  join each memory with its CURRENT model's vector only (384 or 768 wide) and
+  include `agent` and `session`.
