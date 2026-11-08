@@ -114,7 +114,7 @@ async fn schema1_brain_migrates_additively() {
         .unwrap();
     let stats = store.stats(&path).await.unwrap();
     assert_eq!(stats.memories, 2);
-    assert_eq!(stats.schema_version, 2);
+    assert_eq!(stats.schema_version, 3);
 }
 
 #[tokio::test]
@@ -144,17 +144,16 @@ async fn reembed_regenerates_vectors_and_preserves_everything() {
     let brain = Brain::open(cfg.clone()).await.unwrap();
     let arctic = model_by_id("SnowflakeArcticEmbedMQ").unwrap();
     let report = brain
-        .reembed_with(arctic, |text| {
-            // Synthetic 768-dim embedding derived from the text, never from old vectors.
+        .reembed_with(arctic, rusty_brain::app::Prune::Keep, |text| {
             let hot = if text.starts_with("alpha") { 3 } else { 4 };
             Ok(unit(768, hot))
         })
         .await
         .unwrap();
-    assert_eq!(report.memories, 1); // one active, one soft-deleted
+    assert_eq!(report.memories, 2); // both rows, soft-deleted included
     assert_eq!(report.from_model, "BGESmallENV15Q");
     assert_eq!(report.to_model, "SnowflakeArcticEmbedMQ");
-    assert!(report.backup_path.exists(), "old brain is kept as backup");
+    assert!(report.pruned_models.is_empty());
 
     let migrated = Store::open(&db_path).await.unwrap();
     let kept = migrated.get(&keep).await.unwrap().unwrap();
@@ -168,16 +167,69 @@ async fn reembed_regenerates_vectors_and_preserves_everything() {
         "soft-deleted stays deleted"
     );
 
-    // The new brain really speaks 768 dimensions now.
-    let rows = migrated.raw_rows().await.unwrap();
-    assert_eq!(rows.len(), 2);
+    // Both models' vectors exist; exports use only the current model (768).
+    assert_eq!(
+        migrated
+            .count_embeddings("SnowflakeArcticEmbedMQ")
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        migrated.count_embeddings("BGESmallENV15Q").await.unwrap(),
+        2
+    );
     let exported = migrated.all_for_export().await.unwrap();
+    assert_eq!(exported.len(), 1);
     assert_eq!(exported[0].1.len(), 768);
     assert_eq!(exported[0].1[3], 1.0);
 
-    // Re-embedding into the same model is refused.
-    let err = brain
-        .reembed_with(arctic, |_| Ok(unit(768, 0)))
+    // Pruning the old model drops only its vectors.
+    let bge = model_by_id("BGESmallENV15Q").unwrap();
+    let brain2 = Brain::open(cfg.clone()).await.unwrap();
+    brain2
+        .reembed_with(bge, rusty_brain::app::Prune::Old, |_| Ok(unit(384, 5)))
+        .await
+        .unwrap();
+    let after = Store::open(&db_path).await.unwrap();
+    assert_eq!(
+        after
+            .count_embeddings("SnowflakeArcticEmbedMQ")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(after.count_embeddings("BGESmallENV15Q").await.unwrap(), 2);
+    let exported = after.all_for_export().await.unwrap();
+    assert_eq!(exported[0].1.len(), 384);
+    assert_eq!(exported[0].1[5], 1.0);
+
+    // Prune-all keeps only the current model.
+    let arctic2 = model_by_id("SnowflakeArcticEmbedMQ").unwrap();
+    let brain3 = Brain::open(cfg.clone()).await.unwrap();
+    brain3
+        .reembed_with(arctic2, rusty_brain::app::Prune::All, |_| Ok(unit(768, 6)))
+        .await
+        .unwrap();
+    let final_store = Store::open(&db_path).await.unwrap();
+    assert_eq!(
+        final_store
+            .count_embeddings("BGESmallENV15Q")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        final_store
+            .count_embeddings("SnowflakeArcticEmbedMQ")
+            .await
+            .unwrap(),
+        2
+    );
+
+    // Re-embedding into the current model is refused.
+    let err = brain3
+        .reembed_with(arctic2, rusty_brain::app::Prune::Keep, |_| Ok(unit(768, 0)))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("already uses"));

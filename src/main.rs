@@ -66,6 +66,17 @@ enum Command {
     Reembed {
         /// Target model id (see `rusty-brain models`).
         model: String,
+        /// Delete the previous model's vectors after a successful migration.
+        #[arg(long, conflicts_with = "prune_all")]
+        prune: bool,
+        /// Delete every older model's vectors after a successful migration.
+        #[arg(long)]
+        prune_all: bool,
+    },
+    /// Switch to a model whose vectors already cover every active memory.
+    UseModel {
+        /// Existing model id to select without re-embedding.
+        model: String,
     },
     /// List the supported embedding models.
     Models,
@@ -154,15 +165,36 @@ async fn run() -> Result<()> {
             let (path, count) = brain.export_parquet().await?;
             println!("exported {count} memories to {}", path.display());
         }
-        Command::Reembed { model } => {
-            let report = brain.reembed(&model).await?;
+        Command::Reembed {
+            model,
+            prune,
+            prune_all,
+        } => {
+            let mode = if prune_all {
+                rusty_brain::app::Prune::All
+            } else if prune {
+                rusty_brain::app::Prune::Old
+            } else {
+                rusty_brain::app::Prune::Keep
+            };
+            let report = brain.reembed(&model, mode).await?;
+            let note = if report.pruned_models.is_empty() {
+                "old vectors kept (use-model switches back without re-embedding)".to_string()
+            } else {
+                format!("pruned: {}", report.pruned_models.join(", "))
+            };
             println!(
-                "re-embedded {} memories: {} -> {} (old brain: {})",
-                report.memories,
-                report.from_model,
-                report.to_model,
-                report.backup_path.display()
+                "re-embedded {} memories: {} -> {} ({note})",
+                report.memories, report.from_model, report.to_model
             );
+        }
+        Command::UseModel { model } => {
+            let from = brain.use_model(&model).await?;
+            if from == model {
+                println!("brain already uses {model}");
+            } else {
+                println!("switched model: {from} -> {model} (existing vectors; no re-embedding)");
+            }
         }
         Command::Models => {
             for m in rusty_brain::config::MODELS {

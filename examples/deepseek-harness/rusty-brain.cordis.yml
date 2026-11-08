@@ -5,6 +5,9 @@
         serverName: rusty-brain
         transport: stdio
         command: rusty-brain
+        env:
+          RUSTY_BRAIN_AGENT: dsh
+          RUSTY_BRAIN_SESSION: dsh-headless
         args: !!js >-
           process.env.RUSTY_BRAIN_PROJECT
             ? ['--project', process.env.RUSTY_BRAIN_PROJECT, 'serve']

@@ -31,7 +31,7 @@
         "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6",
         "description": "2c034cf1f5a4b4558f4309bbd1f1e90d3693480c3eec371699df3a2f6a7ba144",
         "inputSchema": "0315fc123cf5b3495e854ac63c47aaff76b34851a87baa07a783533f93acfe57",
-        "outputSchema": "e1bbb6c808d199ca8b49e13ae36a824ff47257e85da7c12ed54c641e8f840d7f"
+        "outputSchema": "43b955ae1b544e83711a5b3102dc96e48e5c9bb1592a52ee08544ae5912fd1a4"
       },
       "idempotency": "idempotent",
       "inputSchema": {
@@ -54,7 +54,13 @@
           "model": {
             "type": "string"
           },
+          "models_dir": {
+            "type": "string"
+          },
           "project": {
+            "type": "string"
+          },
+          "project_dir": {
             "type": "string"
           }
         },
@@ -62,7 +68,9 @@
           "home",
           "brain_file",
           "project",
-          "model"
+          "model",
+          "models_dir",
+          "project_dir"
         ],
         "type": "object"
       },
@@ -142,7 +150,7 @@
       "hashes": {
         "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6",
         "description": "371b806fd082ffa35d77207756dec1cdbb469ac350b2464224da6a92817a0876",
-        "inputSchema": "9a401979d8e4be2105e73d578318c1f115e4feda91ac70450650ffc2b2086757",
+        "inputSchema": "db45b86b4aaf6365276923fa32799f53da4da2638f18d30c0688ecde0f46e5cc",
         "outputSchema": "95efdb6b0080604c4f45af48af44ddac378ac773c58f5767fc34163db5b74bb0"
       },
       "idempotency": "idempotent",
@@ -152,6 +160,7 @@
         "properties": {
           "agent": {
             "description": "Recall scope: `all` (default), `self`, `others`, or an agent name.",
+            "maxLength": 128,
             "type": [
               "string",
               "null"
@@ -168,6 +177,7 @@
           },
           "query": {
             "description": "Natural-language or keyword query.",
+            "maxLength": 4096,
             "type": "string"
           }
         },
@@ -284,7 +294,7 @@
       "hashes": {
         "annotations": "d72d3cb182e3d7fcf0b1c6782251eee772cdf2a99470e1a4bd6a006b5c8f4e25",
         "description": "c8eef31127e5a4107ade48cc32e0025918bffed4c6e9c9277229bcbb984d0b99",
-        "inputSchema": "733c2703d945873a50adff2275d5e680af0efc72c2eb92e50af36eb783c844a6",
+        "inputSchema": "ceb8096f648c92e1f6501bcc7a10311e92d48297a8c3e244c1c9fd48101609db",
         "outputSchema": "d1150878b25ddcbee65a41ce8161cffc618ac084c574c0ebfa27f68f38047ed0"
       },
       "idempotency": "not idempotent; repeated calls create distinct UUIDs",
@@ -294,10 +304,12 @@
         "properties": {
           "content": {
             "description": "The fact or note to store for this project.",
+            "maxLength": 100000,
             "type": "string"
           },
           "tags": {
             "description": "Optional comma-separated tags (e.g. \"decision,duckdb\").",
+            "maxLength": 1024,
             "type": [
               "string",
               "null"
@@ -347,7 +359,7 @@
         "annotations": "ae78503371695cf7d7b89784165a967b2135219ecf6527f06a2c1c73d05c6ae6",
         "description": "25ff8e2ae281a4896ea99d0d068c0bd38d77b03aa61d0501e6f431a1e86c32ca",
         "inputSchema": "0315fc123cf5b3495e854ac63c47aaff76b34851a87baa07a783533f93acfe57",
-        "outputSchema": "4ef1f23fb9dd8b1a94ca72f85f1ad381634b5453c088595d7f0aa37d16c4aca2"
+        "outputSchema": "8b9a7e6351c177ab7c0a005a62798eae9030687c9529708e79a2a8e10beca9fd"
       },
       "idempotency": "idempotent",
       "inputSchema": {
@@ -389,8 +401,14 @@
           "model": {
             "type": "string"
           },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "schema_version": {
-            "const": 2,
+            "const": 3,
             "type": "integer"
           }
         },

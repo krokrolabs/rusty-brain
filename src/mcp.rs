@@ -108,6 +108,16 @@ pub fn application_error(error: &anyhow::Error) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(message)])
 }
 
+fn invalid_params(error: serde_json::Error) -> ErrorData {
+    ErrorData::invalid_params(
+        truncate_utf8(
+            format!("failed to deserialize parameters: {error}"),
+            MCP_ERROR_TEXT_CAP_BYTES,
+        ),
+        None,
+    )
+}
+
 fn structured_success<T: Serialize>(value: T, text: Option<String>) -> CallToolResult {
     match serde_json::to_value(value) {
         Ok(value) => {
@@ -164,16 +174,18 @@ fn stats_output_schema() -> Arc<JsonObject> {
     schema(
         json!({"type":"object","additionalProperties":false,"required":["memories","model","schema_version","db_path","db_bytes"],"properties":{
             "memories":{"type":"integer","minimum":0},"model":{"type":"string"},
-            "schema_version":{"type":"integer","const":2},"db_path":{"type":"string"},"db_bytes":{"type":"integer","minimum":0},
-            "by_agent":{"type":"array","items":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]}}
+            "schema_version":{"type":"integer","const":3},"db_path":{"type":"string"},"db_bytes":{"type":"integer","minimum":0},
+            "by_agent":{"type":"array","items":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]}},
+            "models":{"type":"array","items":{"type":"string"}}
         }}),
     )
 }
 
 fn path_output_schema() -> Arc<JsonObject> {
     schema(
-        json!({"type":"object","additionalProperties":false,"required":["home","brain_file","project","model"],"properties":{
-            "home":{"type":"string"},"brain_file":{"type":"string"},"project":{"type":"string"},"model":{"type":"string"}
+        json!({"type":"object","additionalProperties":false,"required":["home","brain_file","project","model","models_dir","project_dir"],"properties":{
+            "home":{"type":"string"},"brain_file":{"type":"string"},"project":{"type":"string"},"model":{"type":"string"},
+            "models_dir":{"type":"string"},"project_dir":{"type":"string"}
         }}),
     )
 }
@@ -182,8 +194,10 @@ fn path_output_schema() -> Arc<JsonObject> {
 #[serde(deny_unknown_fields)]
 pub struct RememberArgs {
     /// The fact or note to store for this project.
+    #[schemars(length(max = 100_000))]
     pub content: String,
     /// Optional comma-separated tags (e.g. "decision,duckdb").
+    #[schemars(length(max = 1_024))]
     pub tags: Option<String>,
 }
 
@@ -191,10 +205,12 @@ pub struct RememberArgs {
 #[serde(deny_unknown_fields)]
 pub struct RecallArgs {
     /// Natural-language or keyword query.
+    #[schemars(length(max = 4_096))]
     pub query: String,
     /// Maximum number of memories to return (default 5).
     pub limit: Option<usize>,
     /// Recall scope: `all` (default), `self`, `others`, or an agent name.
+    #[schemars(length(max = 128))]
     pub agent: Option<String>,
 }
 
@@ -215,6 +231,8 @@ struct PathInfo {
     brain_file: String,
     project: String,
     model: String,
+    models_dir: String,
+    project_dir: String,
 }
 
 #[derive(Clone)]
@@ -315,13 +333,20 @@ impl BrainServer {
         &self,
         Parameters(_args): Parameters<EmptyArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let info = PathInfo {
-            home: self.brain.cfg.home.display().to_string(),
-            brain_file: self.brain.cfg.db_path().display().to_string(),
-            project: self.brain.cfg.project.clone(),
-            model: crate::config::MODEL_ID.to_string(),
-        };
-        Ok(structured_success(info, None))
+        match self.brain.current_model().await {
+            Ok(model) => {
+                let info = PathInfo {
+                    home: self.brain.cfg.home.display().to_string(),
+                    brain_file: self.brain.cfg.db_path().display().to_string(),
+                    project: self.brain.cfg.project.clone(),
+                    model,
+                    models_dir: self.brain.cfg.models_dir().display().to_string(),
+                    project_dir: self.brain.cfg.project_dir().display().to_string(),
+                };
+                Ok(structured_success(info, None))
+            }
+            Err(error) => Ok(application_error(&error)),
+        }
     }
 }
 
@@ -482,10 +507,7 @@ impl ServerHandler for BrainServer {
             _ => Ok(()),
         };
         if let Err(error) = parsed {
-            return Err(ErrorData::invalid_params(
-                format!("failed to deserialize parameters: {error}"),
-                None,
-            ));
+            return Err(invalid_params(error));
         }
         Self::tool_router()
             .call(ToolCallContext::new(self, request, context))
@@ -671,6 +693,71 @@ print(json.dumps([hashlib.sha256(value).hexdigest() for value in values]))
             Some(value) => unsafe { std::env::set_var("RB_TEST_SECRET", value) },
             None => unsafe { std::env::remove_var("RB_TEST_SECRET") },
         }
+    }
+
+    #[tokio::test]
+    async fn data_path_reports_the_active_nondefault_model_and_all_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::new(
+            Some(temp.path().join("home")),
+            Some("paths".into()),
+            Some("test".into()),
+            None,
+        )
+        .unwrap();
+        let brain = Arc::new(
+            crate::app::Brain::open_synthetic(cfg.clone())
+                .await
+                .unwrap(),
+        );
+        brain.remember("model identity", "").await.unwrap();
+        brain
+            .reembed("AllMiniLML6V2Q", crate::app::Prune::Keep)
+            .await
+            .unwrap();
+        let server = BrainServer::new(brain);
+        let result = server.data_path(Parameters(EmptyArgs {})).await.unwrap();
+        let value = result.structured_content.unwrap();
+        assert_eq!(value["model"], "AllMiniLML6V2Q");
+        assert_eq!(value["models_dir"], cfg.models_dir().display().to_string());
+        assert_eq!(
+            value["project_dir"],
+            cfg.project_dir().display().to_string()
+        );
+    }
+
+    #[test]
+    fn input_schema_limits_and_protocol_error_text_are_bounded() {
+        let tools = tool_definitions();
+        let remember = tools.iter().find(|tool| tool.name == "remember").unwrap();
+        assert_eq!(
+            remember.input_schema["properties"]["content"]["maxLength"],
+            100_000
+        );
+        assert_eq!(
+            remember.input_schema["properties"]["tags"]["maxLength"],
+            1_024
+        );
+        let recall = tools.iter().find(|tool| tool.name == "recall").unwrap();
+        assert_eq!(
+            recall.input_schema["properties"]["query"]["maxLength"],
+            4_096
+        );
+        assert_eq!(recall.input_schema["properties"]["agent"]["maxLength"], 128);
+
+        let unknown = "é".repeat(5_000);
+        let error = serde_json::from_value::<RememberArgs>(json!({
+            "content": "not stored", unknown: true
+        }))
+        .unwrap_err();
+        let error = invalid_params(error);
+        assert!(error.message.len() <= MCP_ERROR_TEXT_CAP_BYTES);
+        assert!(error.message.is_char_boundary(error.message.len()));
+        assert!(
+            error
+                .message
+                .starts_with("failed to deserialize parameters:")
+        );
     }
 
     #[test]

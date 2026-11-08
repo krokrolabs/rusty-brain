@@ -27,6 +27,19 @@ def source_rows(path: Path) -> tuple[list[str], list[tuple[object, ...]]]:
     connection = sqlite3.connect(uri, uri=True)
     try:
         connection.execute("SELECT value FROM meta WHERE key = 'embedding_model'").fetchone()
+        is_v3 = connection.execute(
+            "SELECT value FROM meta WHERE key = 'current_model'"
+        ).fetchone()
+        if is_v3:
+            current = is_v3[0]
+            return CURRENT_COLUMNS, connection.execute(
+                "SELECT m.id, m.content, m.tags, ? AS embedding_model, "
+                "m.created_at, m.agent, m.session, e.embedding "
+                "FROM memories m JOIN memory_embeddings e "
+                "ON e.memory_id = m.id AND e.model = ? "
+                "WHERE m.deleted_at IS NULL ORDER BY m.created_at ASC",
+                (current, current),
+            ).fetchall()
         columns = {row[1] for row in connection.execute("PRAGMA table_info(memories)")}
         provenance = "agent" in columns and "session" in columns
         selected = CURRENT_COLUMNS if provenance else LEGACY_COLUMNS
@@ -87,7 +100,7 @@ def main() -> int:
 
     print(
         f"DuckDB 2.0.0 verified {args.parquet}: rows={len(actual)}, "
-        f"schema={len(columns)} columns/FLOAT[] ({dimension} values each), all vectors exact"
+        f"schema={len(columns)} columns/FLOAT[] ({dimension if dimension is not None else 0} values each), all vectors exact"
     )
     return 0
 
