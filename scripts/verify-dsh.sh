@@ -15,6 +15,9 @@ export VERIFY_ROOT
 export RUSTY_BRAIN_VERIFY_ROOT="$VERIFY_ROOT"
 export RUSTY_BRAIN_HOME="$VERIFY_ROOT/home"
 export RUSTY_BRAIN_PROJECT="rb-dsh-e2e"
+# The dsh session creates this brain; keep the CPU fastembed arm explicit even
+# with the MLX registry default (verify_dsh_session.py asserts it).
+export RUSTY_BRAIN_MODEL="BGESmallENV15Q"
 PROJECT_CWD="$VERIFY_ROOT/work/project"
 BIN="$VERIFY_ROOT/install/bin/rusty-brain"
 DSH_PID=""
@@ -71,6 +74,7 @@ env -i \
   TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
   RUSTY_BRAIN_HOME="$VERIFY_ROOT/home" \
   RUSTY_BRAIN_PROJECT="rb-dsh-e2e" \
+  RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" \
   RUSTY_BRAIN_VERIFY_ROOT="$VERIFY_ROOT" \
   RB_TEST_SECRET="$RB_TEST_SECRET" \
   DEEPSEEK_API_KEY="$RB_TEST_SECRET" \

@@ -12,7 +12,12 @@ fn unit(dim: usize, hot: usize) -> Vec<f32> {
 
 async fn open_store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("brain.db")).await.unwrap();
+    // These store tests use the CPU fastembed arm explicitly; the registry
+    // default is the MLX arm (tests/mlx.rs covers it synthetically).
+    let bge = rusty_brain::config::model_by_id("BGESmallENV15Q").unwrap();
+    let store = Store::open_with_model(&dir.path().join("brain.db"), Some(bge))
+        .await
+        .unwrap();
     (dir, store)
 }
 

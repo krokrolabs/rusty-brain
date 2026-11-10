@@ -10,7 +10,12 @@ fn unit(dim: usize, hot: usize) -> Vec<f32> {
 
 async fn open_store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(&dir.path().join("brain.db")).await.unwrap();
+    // 384-wide fixtures target the CPU fastembed arm explicitly; the registry
+    // default is the MLX arm (covered synthetically in tests/mlx.rs).
+    let bge = rusty_brain::config::model_by_id("BGESmallENV15Q").unwrap();
+    let store = Store::open_with_model(&dir.path().join("brain.db"), Some(bge))
+        .await
+        .unwrap();
     (dir, store)
 }
 
@@ -129,7 +134,8 @@ async fn reembed_regenerates_vectors_and_preserves_everything() {
     .unwrap();
     std::fs::create_dir_all(cfg.project_dir()).unwrap();
     let db_path = cfg.db_path();
-    let store = Store::open(&db_path).await.unwrap();
+    let bge = model_by_id("BGESmallENV15Q").unwrap();
+    let store = Store::open_with_model(&db_path, Some(bge)).await.unwrap();
     let keep = store
         .remember("alpha content", "t1", "claude-code", "s1", &unit(384, 0))
         .await

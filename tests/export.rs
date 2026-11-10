@@ -48,7 +48,7 @@ fn populated_rows() -> Vec<(Memory, Vec<f32>)> {
     ]
 }
 
-fn assert_parquet_matches(path: &Path, expected: &[(Memory, Vec<f32>)]) {
+fn assert_parquet_matches(path: &Path, expected: &[(Memory, Vec<f32>)], dim: i32) {
     let file = std::fs::File::open(path).unwrap();
     let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
     let schema = builder.schema();
@@ -78,7 +78,7 @@ fn assert_parquet_matches(path: &Path, expected: &[(Memory, Vec<f32>)]) {
                 DataType::Float32,
                 true
             )),
-            384,
+            dim,
         )
     );
 
@@ -151,21 +151,23 @@ fn populated_zero_and_rapid_exports_keep_schema_and_prior_file() {
     let rows = populated_rows();
     let (first, count) = export(temp.path(), &rows).unwrap();
     assert_eq!(count, rows.len());
-    assert_parquet_matches(&first, &rows);
+    assert_parquet_matches(&first, &rows, 384);
     let first_hash = std::fs::read(&first).unwrap();
 
     let (second, second_count) = export(temp.path(), &rows).unwrap();
     assert_eq!(second_count, rows.len());
     assert_ne!(first, second, "rapid exports must never collide or sleep");
-    assert_parquet_matches(&second, &rows);
+    assert_parquet_matches(&second, &rows, 384);
     assert!(
         std::fs::read(&first).unwrap() == first_hash,
         "prior snapshot changed"
     );
 
+    // Empty exports keep the declared schema of the configured default model
+    // (the registry default is the 768-wide MLX arm).
     let (empty, empty_count) = export(temp.path(), &[]).unwrap();
     assert_eq!(empty_count, 0);
-    assert_parquet_matches(&empty, &[]);
+    assert_parquet_matches(&empty, &[], 768);
 }
 
 #[tokio::test]
@@ -173,7 +175,8 @@ async fn reported_count_comes_from_selection_not_later_stats() {
     let temp = tempfile::tempdir().unwrap();
     let db_path = temp.path().join("brain.db");
     let export_dir = temp.path().join("exports");
-    let store = Store::open(&db_path).await.unwrap();
+    let bge = rusty_brain::config::model_by_id("BGESmallENV15Q").unwrap();
+    let store = Store::open_with_model(&db_path, Some(bge)).await.unwrap();
     let embedding = vec![0.125; 384];
     store
         .remember("selected one", "", "test-agent", "test-session", &embedding)
@@ -202,7 +205,7 @@ async fn reported_count_comes_from_selection_not_later_stats() {
     let (path, count) = export(&export_dir, &selected).unwrap();
     assert_eq!(store.stats(&db_path).await.unwrap().memories, 3);
     assert_eq!(count, selected.len());
-    assert_parquet_matches(&path, &selected);
+    assert_parquet_matches(&path, &selected, 384);
     let source_after = std::fs::read(&db_path).unwrap();
     assert!(
         source_after == source_before,

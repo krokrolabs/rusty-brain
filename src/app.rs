@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::{Config, MODEL_ID, ModelSpec, model_by_id};
+use crate::config::{Config, ModelSpec, model_by_id};
 use crate::embed::Embedder;
 use crate::store::{
     AgentFilter, Hit, Memory, ModelChanged, Stats, Store, validate_content, validate_limit,
@@ -65,10 +65,12 @@ impl Brain {
 
     /// Read the pointer on every public operation so a long-lived server follows
     /// external re-embed/use-model processes instead of retaining stale state.
+    /// Missing metadata (a brand-new brain) resolves to the configured model
+    /// (`$RUSTY_BRAIN_MODEL` or the registry default).
     pub async fn current_model(&self) -> Result<String> {
         Ok(Store::model_of(&self.cfg.db_path())
             .await?
-            .unwrap_or_else(|| MODEL_ID.to_string()))
+            .unwrap_or_else(|| self.cfg.model.id.to_string()))
     }
 
     async fn store_for(&self, model_id: &str) -> Result<Store> {

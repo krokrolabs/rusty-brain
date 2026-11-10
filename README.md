@@ -26,6 +26,7 @@ flowchart LR
 | `reembed <model>` | Regenerate every vector with another embedding model |
 | `use-model <id>` | Select existing vectors without re-embedding (requires full active coverage) |
 | `models` | List supported embedding models |
+| `setup-mlx` | Install the optional MLX (Metal) sidecar + model (one-time) |
 | `serve` | MCP server on stdio — how agents mount it |
 
 ## How memory is organized
@@ -42,8 +43,11 @@ flowchart TB
   checkouts of the same repo never share a brain — the slug hashes the absolute path.
 - **Every memory records `agent` and `session`**, so several agents can share a
   project brain and still recall only their own, or each other's.
-- **One embedding model per brain** (`BGESmallENV15Q`, 384-dim, local ONNX).
-  Mixing embedding spaces is refused. Switch models with `reembed`.
+- **One embedding model per brain** — new brains default to
+  `mlx-modernbert-4bit` (768-dim, Metal via the MLX sidecar after
+  `setup-mlx`). The CPU fastembed arms such as `BGESmallENV15Q` (384-dim,
+  local ONNX) stay selectable with `RUSTY_BRAIN_MODEL`. Mixing embedding
+  spaces is refused. Switch models with `reembed`.
 - Delete a project = `rm -rf` its directory. There is nothing else, anywhere else.
 - On Unix, data/project/export directories are `0700`; `brain.db` and Parquet
   exports are `0600`. Agent/project fields are conveniences inside this trusted
@@ -151,6 +155,23 @@ vectors: `reembed <model> --prune` (previous model only) or `--prune-all` (every
 older model); the two flags conflict. Exports include **only the current model's
 embedding** per memory.
 
+## Metal acceleration (optional)
+
+New brains default to `mlx-modernbert-4bit` (768-dim ModernBERT, Apache-2.0),
+embedded on Apple Metal through a small self-owned Python sidecar — one-time
+setup, then fully local:
+
+```bash
+rusty-brain setup-mlx   # sidecar + pinned venv + ~80 MB model (needs uv once)
+```
+
+Without setup, remember/recall on a new brain fails with actionable guidance:
+"run `rusty-brain setup-mlx` …". The CPU fastembed arms stay available: set
+`RUSTY_BRAIN_MODEL=BGESmallENV15Q` (or `AllMiniLML6V2Q`,
+`SnowflakeArcticEmbedMQ`) for a new brain, and `reembed`/`use-model` to move an
+existing one between models. Numbers and licenses:
+[docs/models.md](docs/models.md).
+
 ## Troubleshooting
 
 ### 1. Missing or incomplete model cache
@@ -192,9 +213,10 @@ embedding** per memory.
 ## Verification
 
 ```bash
-cargo test --offline                                  # 44 tests, no model download
+cargo test --offline                                  # tests, no model download
 VERIFY_ROOT=$(mktemp -d /tmp/rusty-brain-verify.XXXXXX) scripts/verify-local.sh
 VERIFY_ROOT=<same root> scripts/verify-dsh.sh         # real dsh + Ollama run
+RUSTY_BRAIN_MLX_E2E=1 scripts/verify-mlx.sh           # live MLX/Metal run (~80 MB)
 ```
 
 Verified on macOS arm64 (Rust 1.97): offline embeddings under active network

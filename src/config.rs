@@ -4,39 +4,85 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-/// Default model: small, quantized, runs on CPU with no network at embed time.
-pub const MODEL_ID: &str = "BGESmallENV15Q";
-pub const MODEL_DIM: i64 = 384;
+/// Default model for NEW brains: ModernBERT-embed on MLX/Metal (owner decision,
+/// 2026-11-10). Existing brains keep their recorded model; the model only works
+/// after `rusty-brain setup-mlx`. The three fastembed arms stay selectable with
+/// `$RUSTY_BRAIN_MODEL` for CPU-only machines and via reembed/use-model.
+pub const MODEL_ID: &str = "mlx-modernbert-4bit";
+pub const MODEL_DIM: i64 = 768;
+
+/// Which runtime computes a model's embeddings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// In-process fastembed (ONNX Runtime, CPU only).
+    Fastembed,
+    /// Out-of-process MLX sidecar (`rusty-brain setup-mlx`); Metal when
+    /// present, CPU otherwise.
+    Mlx,
+}
 
 /// A supported embedding model. The id is recorded per brain and per row;
 /// switching models means re-embedding, never reusing old vectors.
+#[derive(Debug)]
 pub struct ModelSpec {
     pub id: &'static str,
     pub dim: i64,
-    pub variant: fastembed::EmbeddingModel,
-    /// Retrieval instruction prepended to *queries only*, never to documents
-    /// (BGE/Arctic convention; MiniLM has none).
+    pub backend: Backend,
+    /// Prefix prepended to *documents* (ModernBERT convention; the fastembed
+    /// arms embed documents raw).
+    pub doc_prefix: &'static str,
+    /// Prefix prepended to *queries only*, never to documents (BGE/Arctic
+    /// convention; MiniLM and ModernBERT document arms differ).
     pub query_prefix: &'static str,
+    /// fastembed registry entry; `None` for models fastembed cannot serve.
+    pub fastembed_variant: Option<fastembed::EmbeddingModel>,
+    /// Upstream Hugging Face repo (or path) of the model artifact.
+    pub source: &'static str,
 }
 
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: "AllMiniLML6V2Q",
         dim: 384,
-        variant: fastembed::EmbeddingModel::AllMiniLML6V2Q,
+        backend: Backend::Fastembed,
+        doc_prefix: "",
         query_prefix: "",
+        fastembed_variant: Some(fastembed::EmbeddingModel::AllMiniLML6V2Q),
+        // Upstream model card: Apache-2.0.
+        source: "sentence-transformers/all-MiniLM-L6-v2",
     },
     ModelSpec {
         id: "BGESmallENV15Q",
         dim: 384,
-        variant: fastembed::EmbeddingModel::BGESmallENV15Q,
+        backend: Backend::Fastembed,
+        doc_prefix: "",
         query_prefix: "Represent this sentence for searching relevant passages: ",
+        fastembed_variant: Some(fastembed::EmbeddingModel::BGESmallENV15Q),
+        // Upstream model card: MIT.
+        source: "BAAI/bge-small-en-v1.5",
     },
     ModelSpec {
         id: "SnowflakeArcticEmbedMQ",
         dim: 768,
-        variant: fastembed::EmbeddingModel::SnowflakeArcticEmbedMQ,
+        backend: Backend::Fastembed,
+        doc_prefix: "",
         query_prefix: "Represent this sentence for searching relevant passages: ",
+        fastembed_variant: Some(fastembed::EmbeddingModel::SnowflakeArcticEmbedMQ),
+        // Upstream model card: Apache-2.0.
+        source: "Snowflake/snowflake-arctic-embed-m",
+    },
+    ModelSpec {
+        id: "mlx-modernbert-4bit",
+        dim: 768,
+        backend: Backend::Mlx,
+        doc_prefix: "search_document: ",
+        query_prefix: "search_query: ",
+        fastembed_variant: None,
+        // Apache-2.0 (nomic-ai ModernBERT-embed-base; the mlx-community 4-bit
+        // conversion inherits the license). Served by the self-owned MIT
+        // sidecar; mlx is MIT and transformers is Apache-2.0 — the GPL-3.0
+        // mlx-embeddings package is deliberately NOT used anywhere.
+        source: "mlx-community/nomicai-modernbert-embed-base-4bit",
     },
 ];
 
@@ -48,6 +94,25 @@ pub fn default_model() -> &'static ModelSpec {
     model_by_id(MODEL_ID).expect("default model is registered")
 }
 
+/// Model for NEW brains: `$RUSTY_BRAIN_MODEL` when set (validated against the
+/// registry), else the default. Existing brains always keep their recorded
+/// model regardless of the variable.
+pub fn model_from_env() -> Result<&'static ModelSpec> {
+    let requested = std::env::var("RUSTY_BRAIN_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    match requested {
+        None => Ok(default_model()),
+        Some(id) => model_by_id(&id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown RUSTY_BRAIN_MODEL '{id}' (known models: {})",
+                MODELS.iter().map(|m| m.id).collect::<Vec<_>>().join(", ")
+            )
+        }),
+    }
+}
+
 /// Which agent wrote a memory: the harness's mount config sets this env var
 /// (`claude-code`, `dsh`, …). Manual CLI use records `cli`.
 pub fn agent_from_env() -> String {
@@ -56,6 +121,17 @@ pub fn agent_from_env() -> String {
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "cli".to_string())
+}
+
+/// The recall-filter control words. They are reserved for `--agent <scope>`
+/// arguments and are never valid recorded agent names: the CLI's global
+/// `--agent` argument and the `recall --agent` filter argument share one
+/// `--agent` flag name, so a scope word can reach `Config` as an override and
+/// must be discarded there instead of poisoning the recorded identity.
+const AGENT_SCOPE_WORDS: [&str; 3] = ["self", "others", "all"];
+
+fn is_agent_scope_word(value: &str) -> bool {
+    AGENT_SCOPE_WORDS.contains(&value)
 }
 
 #[derive(Clone, Debug)]
@@ -69,6 +145,8 @@ pub struct Config {
     /// Optional session identifier/name, when the harness provides one
     /// (`--session`, or `$RUSTY_BRAIN_SESSION`).
     pub session: String,
+    /// Model used when creating a NEW brain (`$RUSTY_BRAIN_MODEL` or default).
+    pub model: &'static ModelSpec,
 }
 
 impl Config {
@@ -89,7 +167,11 @@ impl Config {
             Some(p) => validate_project(&p)?,
             None => project_from_cwd()?,
         };
-        let agent = agent.unwrap_or_else(agent_from_env);
+        // Discard recall-scope words (`--agent self` reaching the global arg);
+        // a real agent identity then comes from `RUSTY_BRAIN_AGENT`.
+        let agent = agent
+            .filter(|value| !is_agent_scope_word(value))
+            .unwrap_or_else(agent_from_env);
         let session = session
             .or_else(|| std::env::var("RUSTY_BRAIN_SESSION").ok())
             .unwrap_or_default();
@@ -100,6 +182,7 @@ impl Config {
             project,
             agent,
             session,
+            model: model_from_env()?,
         })
     }
 

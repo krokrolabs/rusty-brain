@@ -33,8 +33,15 @@ async fn count(conn: &Connection, sql: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+/// A 384-wide fresh brain on the explicit fastembed arm (the registry default
+/// is the MLX arm, which these legacy store tests do not exercise).
+async fn open_bge_store(path: &Path) -> Store {
+    let bge = rusty_brain::config::model_by_id("BGESmallENV15Q").unwrap();
+    Store::open_with_model(path, Some(bge)).await.unwrap()
+}
+
 async fn one_memory(path: &Path) -> Store {
-    let store = Store::open(path).await.unwrap();
+    let store = open_bge_store(path).await;
     store
         .remember("old model remains usable", "", "a", "s", &unit(384, 0))
         .await
@@ -73,7 +80,7 @@ async fn live_remember_recall_stats_follow_same_width_switch_and_pointer_switch_
     let cfg = config(temp.path());
     let brain = Brain::open_synthetic(cfg.clone()).await?;
     brain.remember("before switch", "").await?;
-    assert_eq!(brain.stats().await?.model, "BGESmallENV15Q");
+    assert_eq!(brain.stats().await?.model, "mlx-modernbert-4bit");
 
     let external = Brain::open_synthetic(cfg.clone()).await?;
     external
@@ -82,8 +89,8 @@ async fn live_remember_recall_stats_follow_same_width_switch_and_pointer_switch_
         })
         .await?;
 
-    brain.use_model("BGESmallENV15Q").await?;
-    assert_eq!(brain.stats().await?.model, "BGESmallENV15Q");
+    brain.use_model("mlx-modernbert-4bit").await?;
+    assert_eq!(brain.stats().await?.model, "mlx-modernbert-4bit");
     brain.use_model("AllMiniLML6V2Q").await?;
     assert_eq!(brain.stats().await?.model, "AllMiniLML6V2Q");
 
@@ -298,7 +305,7 @@ async fn reembed_rejects_wrong_width_and_nonfinite_vectors_before_any_write() ->
         let cfg = config(temp.path());
         std::fs::create_dir_all(cfg.project_dir())?;
         let path = cfg.db_path();
-        let store = Store::open(&path).await?;
+        let store = open_bge_store(&path).await;
         store.remember("first", "", "a", "s", &unit(384, 0)).await?;
         store
             .remember("second", "", "a", "s", &unit(384, 1))
@@ -347,7 +354,7 @@ async fn empty_interrupted_initialization_is_resumable_but_nonempty_is_refused()
 
     let zero = temp.path().join("zero.db");
     std::fs::write(&zero, [])?;
-    let store = Store::open(&zero).await?;
+    let store = open_bge_store(&zero).await;
     assert_eq!(store.stats(&zero).await?.memories, 0);
 
     let schema_only = temp.path().join("schema-only.db");
@@ -366,7 +373,7 @@ async fn empty_interrupted_initialization_is_resumable_but_nonempty_is_refused()
         )
         .await?;
     }
-    let store = Store::open(&schema_only).await?;
+    let store = open_bge_store(&schema_only).await;
     store
         .remember("resumed", "", "a", "s", &unit(384, 0))
         .await?;
@@ -439,7 +446,7 @@ async fn interrupted_provenance_migration_adds_agent_and_session_independently()
 async fn tied_semantic_distances_use_stable_id_ranks() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("brain.db");
-    let store = Store::open(&path).await?;
+    let store = open_bge_store(&path).await;
     let mut generated = Vec::new();
     for content in ["first inserted", "second inserted", "third inserted"] {
         generated.push(store.remember(content, "", "a", "s", &unit(384, 4)).await?);
@@ -474,7 +481,7 @@ async fn tied_semantic_distances_use_stable_id_ranks() -> Result<()> {
 async fn query_tags_and_provenance_have_byte_caps() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("brain.db");
-    let store = Store::open(&path).await?;
+    let store = open_bge_store(&path).await;
     let embedding = unit(384, 0);
     assert!(
         store
@@ -515,7 +522,7 @@ async fn brain_and_export_paths_use_private_unix_permissions() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let cfg = config(temp.path());
     cfg.ensure_dirs()?;
-    let store = Store::open(&cfg.db_path()).await?;
+    let store = open_bge_store(&cfg.db_path()).await;
     store
         .remember("private", "", "a", "s", &unit(384, 0))
         .await?;

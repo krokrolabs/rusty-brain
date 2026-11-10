@@ -1,27 +1,44 @@
 # Embedding models: choice and licenses
 
-Default for CPU-only use: **`BGESmallENV15Q`** (BGE-small-en-v1.5, 384-dim, ~66 MB).
+Default for NEW brains on Apple-silicon Macs: **`mlx-modernbert-4bit`**
+(MLX ModernBERT-embed-base 4-bit, 768-dim, ~80 MB); requires
+[`rusty-brain setup-mlx`](../README.md#metal-acceleration-optional) once.
 
-| Model id (fastembed) | Upstream | Dim | License (verified 2026-11-06) | Commercial use |
-|---|---|---|---|---|
-| `BGESmallENV15Q` | [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | 384 | **MIT** | yes |
-| `AllMiniLML6V2Q` | [sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | 384 | **Apache-2.0** | yes |
-| `SnowflakeArcticEmbedMQ` | [Snowflake/snowflake-arctic-embed-m](https://huggingface.co/Snowflake/snowflake-arctic-embed-m) | 768 | **Apache-2.0** | yes |
+| Model id | Upstream | Dim | Runtime | License (verified 2026-11-10) | Commercial use |
+|---|---|---|---|---|---|
+| `mlx-modernbert-4bit` | [mlx-community/nomicai-modernbert-embed-base-4bit](https://huggingface.co/mlx-community/nomicai-modernbert-embed-base-4bit) | 768 | MLX sidecar (Metal/CPU) | **Apache-2.0** | yes |
+| `BGESmallENV15Q` | [BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) | 384 | fastembed (CPU) | **MIT** | yes |
+| `AllMiniLML6V2Q` | [sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) | 384 | fastembed (CPU) | **Apache-2.0** | yes |
+| `SnowflakeArcticEmbedMQ` | [Snowflake/snowflake-arctic-embed-m](https://huggingface.co/Snowflake/snowflake-arctic-embed-m) | 768 | fastembed (CPU) | **Apache-2.0** | yes |
 
-Verified from each model's Hugging Face metadata (`cardData.license` / `license:` tag).
+Verified from each model's Hugging Face metadata (`cardData.license` / `license:`
+tag).
 
-Why BGE-small: +9.7 MTEB Retrieval over MiniLM at the same 384-dim width and a
-modest download; Arctic-M is the higher-quality 768-dim alternative. Query
-prefixes follow each model's retrieval convention (BGE/Arctic: instruction on
-queries only, documents raw).
+Retrieval prefixes follow each model's convention and are applied by the
+caller at embed time: ModernBERT uses `search_query: ` on queries and
+`search_document: ` on documents; BGE/Arctic use
+`Represent this sentence for searching relevant passages: ` on queries only;
+documents are always raw on the fastembed arms.
 
-## Held for later: the MLX (Metal) option
+## The MLX (Metal) backend
 
-Not implemented; evaluation on hold per owner decision. If adopted, the best
-candidate is **Qwen3-Embedding-4B-mxfp8**
-([mlx-community](https://huggingface.co/mlx-community/Qwen3-Embedding-4B-mxfp8),
-2560-dim, ~4.15 GB, **Apache-2.0**), behind an optional Python sidecar
-(`mlx-embeddings`; **GPL-3.0**, so bundling needs review). Not `mlx-rs`: it has no
-embedding architectures. Adopt only if it beats BGE-small on a local recall
-fixture with warm p95 < 100 ms. Quantization: prefer MXFP8 over 4-bit DWQ
-(retrieval fidelity of the DWQ artifact is unvalidated).
+`mlx-modernbert-4bit` was measured on the M4 Max (2026-11-09/10 validation
+harness, 20-memory/15-query recall fixture — identical or better Recall@5,
+MRR@5 and top-1 than `BGESmallENV15Q`):
+
+- Warm embed latency, batch of 1: Metal **p50 2.4 ms / p95 2.8-4.6 ms**
+  (graph-compile warmup covers the 32-512 token buckets; no single call pays
+  the compile tail) — incumbent-class, vs BGE's 2.4/3.0;
+  CPU p50 14.1 ms / p95 14.7 ms.
+- RSS 249 MB; download ~80 MB (4-bit safetensors, single file).
+- Architecture: the sidecar (`sidecar/mlx_serve.py`) is self-owned MIT code
+  driving `mlx.core` and a transformers tokenizer. **mlx-embeddings is NOT
+  used** (GPL-3.0); mlx itself is MIT and transformers is Apache-2.0, both
+  pinned in setup (`mlx==0.32.4`, `transformers==5.22.2`). The MLX backend is
+  gated on one-time setup; without it, first use fails with
+  `run \`rusty-brain setup-mlx\` to install the MLX sidecar venv and model`.
+
+CPU-only machines should set `RUSTY_BRAIN_MODEL=BGESmallENV15Q` (the
+previous default) before the first remember of a new brain; existing brains
+keep whatever model they recorded, and `reembed`/`use-model` move them
+between arms regardless of the default.

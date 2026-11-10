@@ -158,7 +158,10 @@ async fn use_model_flips_only_a_fully_covered_pointer_without_model_loading() {
     let project_dir = root.join("projects").join(project);
     std::fs::create_dir_all(&project_dir).unwrap();
     let path = project_dir.join("brain.db");
-    let store = rusty_brain::store::Store::open(&path).await.unwrap();
+    let bge = rusty_brain::config::model_by_id("BGESmallENV15Q").unwrap();
+    let store = rusty_brain::store::Store::open_with_model(&path, Some(bge))
+        .await
+        .unwrap();
     let id = store
         .remember("retained vectors", "", "a", "s", &vec![0.0; 384])
         .await

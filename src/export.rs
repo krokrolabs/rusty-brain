@@ -11,7 +11,6 @@ use parquet::file::properties::WriterProperties;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::MODEL_DIM;
 use crate::store::Memory;
 
 #[derive(Clone, Copy, Debug)]
@@ -34,11 +33,18 @@ pub fn export_with_fault(
     rows: &[(Memory, Vec<f32>)],
     fault: Option<ExportFault>,
 ) -> Result<(PathBuf, usize)> {
-    export_with_dim(dir, rows, MODEL_DIM as usize, fault)
+    // The declared dim comes from the rows when present, else from the
+    // configured default model (empty exports keep a declared schema).
+    let dim = rows
+        .first()
+        .map_or(crate::config::MODEL_DIM as usize, |(_, vector)| {
+            vector.len()
+        });
+    export_with_dim(dir, rows, dim, fault)
 }
 
 /// Export with the brain's actual embedding dimension (384 for MiniLM/BGE,
-/// 768 for Arctic). Empty exports keep the declared schema either way.
+/// 768 for Arctic/ModernBERT). Empty exports keep the declared schema either way.
 pub fn export_with_dim(
     dir: &Path,
     rows: &[(Memory, Vec<f32>)],
