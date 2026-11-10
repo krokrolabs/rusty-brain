@@ -6,10 +6,11 @@ use anyhow::{Context, Result};
 use fastembed::{TextEmbedding, TextInitOptions};
 use std::path::Path;
 
-use crate::config::ModelSpec;
+use crate::config::{Backend, ModelSpec};
 
 enum EmbedderModel {
     FastEmbed(Box<TextEmbedding>),
+    Mlx(Box<crate::mlx::MlxEmbedder>),
     Synthetic,
 }
 
@@ -20,22 +21,36 @@ pub struct Embedder {
 
 impl Embedder {
     pub fn new(models_dir: &Path, spec: &'static ModelSpec) -> Result<Self> {
-        crate::config::ensure_private_dir(models_dir)?;
-        let model = TextEmbedding::try_new(
-            TextInitOptions::new(spec.variant.clone())
-                .with_cache_dir(models_dir.to_path_buf())
-                .with_show_download_progress(true),
-        )
-        .with_context(|| {
-            format!(
-                "loading embedding model {} (first run downloads weights to the models dir)",
-                spec.id
-            )
-        })?;
-        Ok(Self {
-            model: EmbedderModel::FastEmbed(Box::new(model)),
-            spec,
-        })
+        match spec.backend {
+            Backend::Mlx => {
+                let sidecar = crate::mlx::MlxEmbedder::new(models_dir, spec)?;
+                Ok(Self {
+                    model: EmbedderModel::Mlx(Box::new(sidecar)),
+                    spec,
+                })
+            }
+            Backend::Fastembed => {
+                crate::config::ensure_private_dir(models_dir)?;
+                let variant = spec.fastembed_variant.clone().with_context(|| {
+                    format!("model {} has no fastembed registry entry", spec.id)
+                })?;
+                let model = TextEmbedding::try_new(
+                    TextInitOptions::new(variant)
+                        .with_cache_dir(models_dir.to_path_buf())
+                        .with_show_download_progress(true),
+                )
+                .with_context(|| {
+                    format!(
+                        "loading embedding model {} (first run downloads weights to the models dir)",
+                        spec.id
+                    )
+                })?;
+                Ok(Self {
+                    model: EmbedderModel::FastEmbed(Box::new(model)),
+                    spec,
+                })
+            }
+        }
     }
 
     #[doc(hidden)]
@@ -46,13 +61,15 @@ impl Embedder {
         }
     }
 
-    /// Document embedding (memories). No retrieval instruction is ever added.
+    /// Document embedding (memories). The fastembed arms apply no retrieval
+    /// instruction; the MLX arm applies its document prefix in the sidecar.
     pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
         match &mut self.model {
             EmbedderModel::FastEmbed(model) => {
                 let mut out = model.embed(vec![text], None).context("embedding text")?;
                 out.pop().context("empty embedding result")
             }
+            EmbedderModel::Mlx(sidecar) => sidecar.embed(text),
             EmbedderModel::Synthetic => {
                 let mut vector = vec![0.0; self.spec.dim as usize];
                 let model_index = crate::config::MODELS
@@ -70,6 +87,9 @@ impl Embedder {
 
     /// Query embedding: applies the model's retrieval instruction if it has one.
     pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>> {
+        if let EmbedderModel::Mlx(sidecar) = &mut self.model {
+            return sidecar.embed_query(text);
+        }
         if self.spec.query_prefix.is_empty() {
             self.embed(text)
         } else {

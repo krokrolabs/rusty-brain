@@ -17,7 +17,7 @@ in this order (the legacy six-column schema without provenance is still readable
 | `id` | required `Utf8` | Canonical memory UUID |
 | `content` | required `Utf8` | Exact memory text, including non-ASCII UTF-8 |
 | `tags` | required `Utf8` | Comma-separated tags; the empty string is valid |
-| `embedding_model` | required `Utf8` | The brain's model (`BGESmallENV15Q` by default, `SnowflakeArcticEmbedMQ` after re-embed) |
+| `embedding_model` | required `Utf8` | The brain's model (`mlx-modernbert-4bit` for new default brains, `BGESmallENV15Q`/`AllMiniLML6V2Q`/`SnowflakeArcticEmbedMQ` on the fastembed arms) |
 | `created_at` | required `Utf8` | UTC RFC 3339 creation timestamp |
 | `agent` | required `Utf8` | Which agent wrote the memory (`claude-code`, `dsh`, `cli`, …); empty for legacy rows |
 | `session` | required `Utf8` | Session id/name when the harness provided one; empty otherwise |

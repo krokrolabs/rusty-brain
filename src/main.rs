@@ -80,6 +80,9 @@ enum Command {
     },
     /// List the supported embedding models.
     Models,
+    /// Install the optional MLX (Metal) backend: sidecar script, pinned venv,
+    /// and the model artifact (idempotent; needs network and uv once).
+    SetupMlx,
 }
 
 #[tokio::main]
@@ -123,6 +126,12 @@ async fn run() -> Result<()> {
         println!("brain:    {}", cfg.db_path().display());
         println!("models:   {}", cfg.models_dir().display());
         println!("exports:  {}", cfg.exports_dir().display());
+        return Ok(());
+    }
+
+    // `setup-mlx` needs no database either; it populates the home directory.
+    if matches!(cli.cmd, Command::SetupMlx) {
+        rusty_brain::mlx::setup(&cfg.home)?;
         return Ok(());
     }
 
@@ -198,10 +207,18 @@ async fn run() -> Result<()> {
         }
         Command::Models => {
             for m in rusty_brain::config::MODELS {
-                println!("{} (dim {})", m.id, m.dim);
+                match m.backend {
+                    rusty_brain::config::Backend::Fastembed => {
+                        println!("{} (dim {})", m.id, m.dim);
+                    }
+                    rusty_brain::config::Backend::Mlx => {
+                        println!("{} (dim {}, MLX; needs setup-mlx)", m.id, m.dim);
+                    }
+                }
             }
         }
         Command::Path => unreachable!(),
+        Command::SetupMlx => unreachable!("handled before the brain is opened"),
     }
     Ok(())
 }

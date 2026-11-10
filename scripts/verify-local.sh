@@ -16,6 +16,7 @@ export VERIFY_ROOT
 export RUSTY_BRAIN_VERIFY_ROOT="$VERIFY_ROOT"
 export RUSTY_BRAIN_HOME="$VERIFY_ROOT/home"
 export RUSTY_BRAIN_PROJECT="rb-local-e2e"
+export RUSTY_BRAIN_MODEL="BGESmallENV15Q"
 BIN="$VERIFY_ROOT/install/bin/rusty-brain"
 PROFILE="$RB/tests/fixtures/no-network.sb"
 RUNTIME_PATH="$VERIFY_ROOT/install/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -37,7 +38,7 @@ run_rb() {
     local project="$1"
     shift
     env -i HOME="$HOME" PATH="$RUNTIME_PATH" TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
-        RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" "$BIN" --project "$project" "$@"
+        RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" "$BIN" --project "$project" "$@"
 }
 
 run_rb_at_home() {
@@ -45,7 +46,7 @@ run_rb_at_home() {
     local project="$2"
     shift 2
     env -i HOME="$HOME" PATH="$RUNTIME_PATH" TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
-        RUSTY_BRAIN_HOME="$home" "$BIN" --project "$project" "$@"
+        RUSTY_BRAIN_HOME="$home" RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" "$BIN" --project "$project" "$@"
 }
 
 sandbox_rb() {
@@ -53,7 +54,7 @@ sandbox_rb() {
     shift
     /usr/bin/sandbox-exec -f "$PROFILE" /usr/bin/env -i \
         HOME="$HOME" PATH="$RUNTIME_PATH" TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
-        RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" "$BIN" --project "$project" "$@"
+        RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" "$BIN" --project "$project" "$@"
 }
 
 printf 'Proving the sandbox control succeeds outside and is denied inside\n'
@@ -216,7 +217,7 @@ EMPTY_HOME="$VERIFY_ROOT/empty-cache-home"
 set +e
 /usr/bin/sandbox-exec -f "$PROFILE" /usr/bin/env -i \
     HOME="$HOME" PATH="$RUNTIME_PATH" TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
-    RUSTY_BRAIN_HOME="$EMPTY_HOME" "$BIN" --project empty-cache remember 'must not be stored offline' \
+    RUSTY_BRAIN_HOME="$EMPTY_HOME" RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" "$BIN" --project empty-cache remember 'must not be stored offline' \
     >"$VERIFY_ROOT/empty-cache.stdout" 2>"$VERIFY_ROOT/empty-cache.stderr"
 EMPTY_STATUS=$?
 set -e
@@ -248,14 +249,14 @@ done
 PROBE_PORT="$(uv run --no-project python -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["port"])' "$PROBE_DIR/ready.json")"
 ENDPOINT="http://127.0.0.1:$PROBE_PORT"
 env -i HOME="$HOME" PATH="$RUNTIME_PATH" TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
-    HF_ENDPOINT="$ENDPOINT" RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" \
+    HF_ENDPOINT="$ENDPOINT" RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" \
     "$BIN" --project "$RUSTY_BRAIN_PROJECT" recall 'write-once' --limit 1 > "$VERIFY_ROOT/probe-ready.json"
 READY_SUMMARY="$(uv run --no-project python -I "$RB/scripts/network_probe.py" summary --state-dir "$PROBE_DIR")"
 uv run --no-project python -I -c 'import json,sys; s=json.loads(sys.argv[1]); assert s["connections"] == 0 and s["requests"] == 0, s; print("ready-cache probe:", s)' "$READY_SUMMARY"
 
 set +e
 env -i HOME="$HOME" PATH="$RUNTIME_PATH" TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
-    HF_ENDPOINT="$ENDPOINT" RUSTY_BRAIN_HOME="$VERIFY_ROOT/probe-empty-home" \
+    HF_ENDPOINT="$ENDPOINT" RUSTY_BRAIN_HOME="$VERIFY_ROOT/probe-empty-home" RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" \
     "$BIN" --project probe-empty remember 'loopback control must fail' \
     >"$VERIFY_ROOT/probe-empty.stdout" 2>"$VERIFY_ROOT/probe-empty.stderr"
 PROBE_EMPTY_STATUS=$?
@@ -342,7 +343,7 @@ for STAGE in write close hard-link cleanup; do
     BEFORE_FILES="$(snapshot_exports)"
     set +e
     env -i HOME="$HOME" PATH="$RUNTIME_PATH" TMPDIR="${TMPDIR:-/tmp}" LANG=en_US.UTF-8 \
-        RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" RUSTY_BRAIN_TEST_EXPORT_FAULT="$STAGE" \
+        RUSTY_BRAIN_HOME="$RUSTY_BRAIN_HOME" RUSTY_BRAIN_MODEL="$RUSTY_BRAIN_MODEL" RUSTY_BRAIN_TEST_EXPORT_FAULT="$STAGE" \
         "$BIN" --project "$RUSTY_BRAIN_PROJECT" export \
         >"$VERIFY_ROOT/export-fault-$STAGE.stdout" 2>"$VERIFY_ROOT/export-fault-$STAGE.stderr"
     FAULT_STATUS=$?
