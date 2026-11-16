@@ -15,9 +15,14 @@ The device is MLX's default (Metal when present, CPU otherwise).
 """
 import json
 import math
+import os
 import re
 import numpy as np
 import sys
+
+# transformers' import-time advisory about the absent PyTorch dependency is
+# noise for a tokenizer-only consumer; the sidecar needs no models.
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 from pathlib import Path
 
 import mlx.core as mx
