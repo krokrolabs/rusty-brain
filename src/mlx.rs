@@ -255,6 +255,7 @@ impl MlxEmbedder {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .env("HF_HUB_DISABLE_XET", "1")
+            .env("TRANSFORMERS_VERBOSITY", "error")
             .spawn()
             .with_context(|| format!("spawning the MLX sidecar with {}", python.display()))?;
         // The stdin/stdout handles are detached from the Child handle: dropping
