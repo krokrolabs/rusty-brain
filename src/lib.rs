@@ -4,4 +4,5 @@ pub mod embed;
 pub mod export;
 pub mod mcp;
 pub mod mlx;
+pub mod session;
 pub mod store;

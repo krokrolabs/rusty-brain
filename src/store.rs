@@ -20,7 +20,7 @@ const SCHEMA_VERSION: i64 = 3;
 const MAX_CONTENT_BYTES: usize = 100_000;
 const MAX_QUERY_BYTES: usize = 4_096;
 const MAX_TAGS_BYTES: usize = 1_024;
-const MAX_PROVENANCE_BYTES: usize = 128;
+pub const MAX_PROVENANCE_BYTES: usize = 128;
 const MAX_LIMIT: usize = 50;
 
 /// A writer observed a model switch after preparing its embedding. The Brain

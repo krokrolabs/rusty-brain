@@ -142,7 +142,8 @@ impl Brain {
         validate_content(content)?;
         validate_tags(tags)?;
         validate_provenance("agent", &self.cfg.agent)?;
-        validate_provenance("session", &self.cfg.session)?;
+        let session = self.cfg.session();
+        validate_provenance("session", &session)?;
         for _ in 0..4 {
             let model = self.current_model().await?;
             let embedding = self.embed(&model, content.to_string(), false).await?;
@@ -152,13 +153,7 @@ impl Brain {
                 Err(error) => return Err(error),
             };
             match store
-                .remember(
-                    content,
-                    tags,
-                    &self.cfg.agent,
-                    &self.cfg.session,
-                    &embedding,
-                )
+                .remember(content, tags, &self.cfg.agent, &session, &embedding)
                 .await
             {
                 Err(error) if Self::model_changed(&error) => continue,
