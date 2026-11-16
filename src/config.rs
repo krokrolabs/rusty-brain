@@ -142,9 +142,9 @@ pub struct Config {
     pub project: String,
     /// Which agent is writing (`--agent`, or `$RUSTY_BRAIN_AGENT`, or `cli`).
     pub agent: String,
-    /// Optional session identifier/name, when the harness provides one
-    /// (`--session`, or `$RUSTY_BRAIN_SESSION`).
-    pub session: String,
+    /// Session set explicitly (`--session`, or `$RUSTY_BRAIN_SESSION`, which
+    /// may be empty to record none). `None` lets [`Config::session`] detect it.
+    pub explicit_session: Option<String>,
     /// Model used when creating a NEW brain (`$RUSTY_BRAIN_MODEL` or default).
     pub model: &'static ModelSpec,
 }
@@ -172,18 +172,24 @@ impl Config {
         let agent = agent
             .filter(|value| !is_agent_scope_word(value))
             .unwrap_or_else(agent_from_env);
-        let session = session
-            .or_else(|| std::env::var("RUSTY_BRAIN_SESSION").ok())
-            .unwrap_or_default();
+        let explicit_session = session.or_else(|| std::env::var("RUSTY_BRAIN_SESSION").ok());
         crate::store::validate_provenance("agent", &agent)?;
-        crate::store::validate_provenance("session", &session)?;
+        if let Some(session) = &explicit_session {
+            crate::store::validate_provenance("session", session)?;
+        }
         Ok(Self {
             home,
             project,
             agent,
-            session,
+            explicit_session,
             model: model_from_env()?,
         })
+    }
+
+    /// The session to record now. Without an explicit one this asks the harness
+    /// on every call, so a session renamed mid-run is recorded under its new name.
+    pub fn session(&self) -> String {
+        crate::session::resolve(self.explicit_session.as_deref())
     }
 
     pub fn project_dir(&self) -> PathBuf {

@@ -111,6 +111,12 @@ cd <your project>
 claude mcp add rusty-brain -e RUSTY_BRAIN_AGENT=claude-code -- rusty-brain serve
 ```
 
+The session is detected: each memory records the name you gave the Claude Code
+session (`/rename`, `claude -n`), read from its local transcript through the
+`CLAUDE_CODE_SESSION_ID` Claude Code passes to the server. A rename applies to
+the next write; an unnamed session records its id. `RUSTY_BRAIN_SESSION`
+overrides this, and setting it empty records no session.
+
 **deepseek-harness (dsh)**: set `RB` to the **absolute** rusty-brain checkout,
 then change to the target project before launching with the shipped overlays:
 
